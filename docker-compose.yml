@@ -1,0 +1,16 @@
+services:
+  futures-panel:
+    build: .
+    image: futures-panel:latest
+    container_name: futures-panel
+    restart: unless-stopped
+    ports:
+      - "8318:8318"
+    volumes:
+      # 数据持久化（映射到 host 目录，删除容器不丢数据）
+      - ./positions.json:/app/positions.json
+      - ./watchlist.json:/app/watchlist.json
+      - ./trades.json:/app/trades.json
+      - ./account.json:/app/account.json
+    environment:
+      - TZ=Asia/Shanghai

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Data files (user-specific)
+positions.json
+watchlist.json
+trades.json
+account.json
+alert_cron.log
+
+# Backups
+backups/
+
+# Temporary scripts
+app_v0.0.9_temp.py
+backtest_sr.py
+backtest_sr_v2.py
+backtest_v2.py
+icons.py
+
+# Node / npm (if any)
+node_modules/
+package-lock.json
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# LaunchAgent plist (user-specific)
+*.plist
