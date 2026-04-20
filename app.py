@@ -388,12 +388,17 @@ def _refresh_price_now(variety):
                 tp_hit = (price >= resistance)
                 if tp_hit:
                     trail_active = True
-                    trail_price = round(entry + 0.5 * atr_val, 2)
+                    # 动态追踪：随价格上涨不断提升止损位
+                    prev_trail = pos.get('trail_price')
+                    new_trail = round(price - 0.5 * atr_val, 2)
+                    trail_price = max(prev_trail or 0, new_trail) if prev_trail else new_trail
             else:
                 tp_hit = (price <= support)
                 if tp_hit:
                     trail_active = True
-                    trail_price = round(entry - 0.5 * atr_val, 2)
+                    prev_trail = pos.get('trail_price')
+                    new_trail = round(price + 0.5 * atr_val, 2)
+                    trail_price = min(prev_trail or 999999, new_trail) if prev_trail else new_trail
             trail_payload = {
                 'variety': variety,
                 'price': price,
@@ -446,8 +451,8 @@ def _watchlist_broadcaster():
                         'is_watchlist': True,
                         'name': name,
                     })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[_watchlist_broadcaster] 异常: {e}")
 
 _watchlist_thread = threading.Thread(target=_watchlist_broadcaster, daemon=True)
 _watchlist_thread.start()
@@ -1680,20 +1685,25 @@ def handle_positions():
 
             # ── 追踪止损计算 ──
             atr_now = atr_val
+            tp_hit = False
             trail_active = False
             trail_price = None
-            tp_hit = False
             if cur_price and atr_now and support and resistance:
                 if direction == 'long':
                     tp_hit = (cur_price >= resistance)
                     if tp_hit:
                         trail_active = True
-                        trail_price = round(entry + 0.5 * atr_now, 2)
+                        # 动态追踪：随价格上涨不断提升止损位
+                        new_trail = round(cur_price - 0.5 * atr_now, 2)
+                        prev_trail = pos.get('trail_price')
+                        trail_price = max(prev_trail or 0, new_trail) if prev_trail else new_trail
                 else:  # short
                     tp_hit = (cur_price <= support)
                     if tp_hit:
                         trail_active = True
-                        trail_price = round(entry - 0.5 * atr_now, 2)
+                        new_trail = round(cur_price + 0.5 * atr_now, 2)
+                        prev_trail = pos.get('trail_price')
+                        trail_price = min(prev_trail or 999999, new_trail) if prev_trail else new_trail
 
             out = dict(pos)
             out.update({
@@ -1776,16 +1786,17 @@ def handle_positions():
 
 @app.route('/api/positions/<int:index>', methods=['DELETE'])
 def delete_position(index):
-    positions = load_positions()
-    # 通过 _idx 匹配
-    target = next((p for p in positions if p.get('_idx') == index), None)
-    new_positions = [p for p in positions if p.get('_idx') != index]
-    if len(new_positions) == len(positions):
-        return jsonify({"error": "持仓不存在"}), 404
-    save_positions(new_positions)
-    # 删除时清除该品种缓存
-    if target:
-        _cache.invalidate(target.get('variety', ''))
+    with _positions_lock:
+        positions = load_positions()
+        # 通过 _idx 匹配
+        target = next((p for p in positions if p.get('_idx') == index), None)
+        new_positions = [p for p in positions if p.get('_idx') != index]
+        if len(new_positions) == len(positions):
+            return jsonify({"error": "持仓不存在"}), 404
+        save_positions(new_positions)
+        # 删除时清除该品种缓存
+        if target:
+            _cache.invalidate(target.get('variety', ''))
     return jsonify({"message": "已删除"})
 
 # ── 多周期共振 ─────────────────────────────────────────
