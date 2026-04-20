@@ -35,3 +35,5 @@ package-lock.json
 
 # LaunchAgent plist (user-specific)
 *.plist
+*.bak*
+templates/*.bak*

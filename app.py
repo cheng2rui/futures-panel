@@ -368,7 +368,49 @@ def _refresh_price_now(variety):
     if result:
         price, unit, name = result
         _cache.set_price(variety, price, unit, name)
-        _broadcast_event('price_update', {"variety": variety, "price": price})
+        # 追踪止损计算（找对应持仓）
+        trail_payload = None
+        positions = load_positions()
+        for pos in positions:
+            v = pos.get('variety', '')
+            if v != variety or not price:
+                continue
+            entry = float(pos.get('entry_price', 0))
+            direction = pos.get('direction', 'long')
+            sr = calc_sr_multi_period(variety)
+            support, resistance, k_val, d_val, j_val, atr_val = sr[0], sr[1], sr[2], sr[3], sr[4], sr[5]
+            if not atr_val or not support or not resistance:
+                continue
+            trail_active = False
+            trail_price = None
+            tp_hit = False
+            if direction == 'long':
+                tp_hit = (price >= resistance)
+                if tp_hit:
+                    trail_active = True
+                    trail_price = round(entry + 0.5 * atr_val, 2)
+            else:
+                tp_hit = (price <= support)
+                if tp_hit:
+                    trail_active = True
+                    trail_price = round(entry - 0.5 * atr_val, 2)
+            trail_payload = {
+                'variety': variety,
+                'price': price,
+                'atr': round(atr_val, 2),
+                'support': support,
+                'resistance': resistance,
+                'entry': entry,
+                'direction': direction,
+                'trail_active': trail_active,
+                'trail_price': trail_price,
+                'tp_hit': tp_hit,
+            }
+            break
+        if trail_payload:
+            _broadcast_event('price_update', trail_payload)
+        else:
+            _broadcast_event('price_update', {"variety": variety, "price": price})
         print(f"[Cache] ✅ {variety} 行情已抓取: {price}")
     else:
         print(f"[Cache] ⚠️ {variety} 未找到匹配合约")
@@ -1065,6 +1107,22 @@ def calc_sr_multi_period(variety, daily_lookback=20, weekly_lookback=12):
             div_type, div_strength)
 
 # ─────────────────────────────────────────────
+# 追踪止损 ATR 获取
+# ─────────────────────────────────────────────
+def get_atr_now(variety, period=14):
+    """获取品种当前 ATR（日线14周期）"""
+    prefix = ''.join(filter(str.isalpha, variety)).upper()
+    suffix = ''.join(filter(str.isdigit, variety))
+    sym = f"{prefix}{suffix}"
+    try:
+        df = ak.futures_zh_daily_sina(symbol=sym)
+        if df is None or len(df) < period:
+            return None
+        return round(float(calc_atr(df, period).iloc[-1]), 2)
+    except Exception:
+        return None
+
+# ─────────────────────────────────────────────
 # 多周期共振分析
 # ─────────────────────────────────────────────
 def _get_minute_df(sym, period='60', bars=100):
@@ -1580,6 +1638,23 @@ def handle_positions():
                         stop_loss = _ri(resistance + 0.5 * (atr_val or 0))
                         take_profit = support
 
+            # ── 追踪止损计算 ──
+            atr_now = atr_val
+            trail_active = False
+            trail_price = None
+            tp_hit = False
+            if cur_price and atr_now and support and resistance:
+                if direction == 'long':
+                    tp_hit = (cur_price >= resistance)
+                    if tp_hit:
+                        trail_active = True
+                        trail_price = round(entry + 0.5 * atr_now, 2)
+                else:  # short
+                    tp_hit = (cur_price <= support)
+                    if tp_hit:
+                        trail_active = True
+                        trail_price = round(entry - 0.5 * atr_now, 2)
+
             out = dict(pos)
             out.update({
                 'pnl': round(pnl, 0) if pnl is not None else None,
@@ -1592,6 +1667,10 @@ def handle_positions():
                 'rr_ratio': rr_ratio,
                 'stop_loss': stop_loss,
                 'take_profit': _ri(take_profit) if take_profit else None,
+                'atr': round(atr_now, 2) if atr_now else None,
+                'trail_active': trail_active,
+                'trail_price': trail_price,
+                'tp_hit': tp_hit,
                 'kdj': {"K": round(k_val,1), "D": round(d_val,1), "J": round(j_val,1)} if k_val else None,
                 'oi_change': round(oi_change, 3) if oi_change is not None else None,
                 'bb_position': round(bb_pos, 2) if bb_pos is not None else None,
@@ -1920,6 +1999,9 @@ def _backtest_one(variety, qty, pv, lookback, atr_mult, direction=None):
             df.at[df.index[i], 'support'] = lo_n + 0.5 * float(df['atr'].iloc[i])
             df.at[df.index[i], 'resistance'] = hi_n - 0.5 * float(df['atr'].iloc[i])
         pos = 0; entry_price = 0; entry_idx = 0; trades = []
+        # 追踪止损状态（持仓中随价格更新）
+        trail_long = False; trail_short = False
+        trail_price = 0.0
         for i in range(20, len(df)):
             if pd.isna(df['atr'].iloc[i]) or pd.isna(df['support'].iloc[i]):
                 continue
@@ -1927,34 +2009,64 @@ def _backtest_one(variety, qty, pv, lookback, atr_mult, direction=None):
             atr_v = float(df['atr'].iloc[i])
             sup = float(df['support'].iloc[i])
             res = float(df['resistance'].iloc[i])
+            ts_active = (i - entry_idx >= 10)  # 持仓≥10日后激活移动止损
+            ts_level_long = float(df['close'].iloc[i-1]) - 1 * atr_v if ts_active else None
+            ts_level_short = float(df['close'].iloc[i-1]) + 1 * atr_v if ts_active else None
             # ── 入场 ──
             if pos == 0 and c > res:  # 收盘突破阻力 → 做多
                 if direction and direction != 'long': pass
                 else:
                     pos = 1; entry_price = c * (1 - slippage / 2); entry_idx = i
+                    trail_long = False; trail_short = False
             elif pos == 0 and c < sup:  # 收盘跌破支撑 → 做空
                 if direction and direction != 'short': pass
                 else:
                     pos = -1; entry_price = c * (1 + slippage / 2); entry_idx = i
+                    trail_long = False; trail_short = False
             # ── 持仓 ──
             elif pos == 1:
-                # 止损：收盘跌破支撑
-                ts_active = (i - entry_idx >= 10)
-                ts_level = float(df['close'].iloc[i-1]) - 1 * atr_v if ts_active else None
-                if c < sup or (ts_active and c < ts_level):
+                # 触发止盈位 → 激活追踪止损（TPHit后持续有效）
+                if c >= res and not trail_long:
+                    trail_long = True
+                    trail_price = entry_price + 0.5 * atr_v  # 初始追踪线
+                # 追踪止损只上移（跟随最高收盘价）
+                if trail_long:
+                    new_trail = c - 0.5 * atr_v
+                    trail_price = max(trail_price, new_trail)
+                    # 价格跌破追踪止损线 → 追踪止损退出
+                    if c < trail_price:
+                        exit_px = c * (1 - slippage / 2)
+                        pnl = (exit_px - entry_price) * pv * qty
+                        trades.append({"entry": round(entry_price, 2), "exit": round(exit_px, 2), "pnl": round(pnl), "type": "long", "entry_idx": int(entry_idx), "exit_idx": int(i), "entry_date": str(df["date"].iloc[entry_idx]), "exit_date": str(df["date"].iloc[i]), "exit_reason": "trailing_stop"})
+                        pos = 0; trail_long = False
+                        continue
+                # 止损：跌破支撑（或移动止损触发）
+                if c < sup or (ts_active and ts_level_long is not None and c < ts_level_long):
                     exit_px = c * (1 - slippage / 2)
                     pnl = (exit_px - entry_price) * pv * qty
-                    trades.append({"entry": round(entry_price, 2), "exit": round(exit_px, 2), "pnl": round(pnl), "type": "long", "entry_idx": int(entry_idx), "exit_idx": int(i), "entry_date": str(df["date"].iloc[entry_idx]), "exit_date": str(df["date"].iloc[i])})
-                    pos = 0
+                    trades.append({"entry": round(entry_price, 2), "exit": round(exit_px, 2), "pnl": round(pnl), "type": "long", "entry_idx": int(entry_idx), "exit_idx": int(i), "entry_date": str(df["date"].iloc[entry_idx]), "exit_date": str(df["date"].iloc[i]), "exit_reason": "stop_loss"})
+                    pos = 0; trail_long = False
             elif pos == -1:
-                # 止损：收盘突破阻力
-                ts_active = (i - entry_idx >= 10)
-                ts_level = float(df['close'].iloc[i-1]) + 1 * atr_v if ts_active else None
-                if c > res or (ts_active and c > ts_level):
+                # 触发止盈位 → 激活追踪止损
+                if c <= sup and not trail_short:
+                    trail_short = True
+                    trail_price = entry_price - 0.5 * atr_v
+                # 追踪止损只下移（跟随最低收盘价）
+                if trail_short:
+                    new_trail = c + 0.5 * atr_v
+                    trail_price = min(trail_price, new_trail)
+                    if c > trail_price:
+                        exit_px = c * (1 + slippage / 2)
+                        pnl = (entry_price - exit_px) * pv * qty
+                        trades.append({"entry": round(entry_price, 2), "exit": round(exit_px, 2), "pnl": round(pnl), "type": "short", "entry_idx": int(entry_idx), "exit_idx": int(i), "entry_date": str(df["date"].iloc[entry_idx]), "exit_date": str(df["date"].iloc[i]), "exit_reason": "trailing_stop"})
+                        pos = 0; trail_short = False
+                        continue
+                # 止损：突破阻力（或移动止损触发）
+                if c > res or (ts_active and ts_level_short is not None and c > ts_level_short):
                     exit_px = c * (1 + slippage / 2)
                     pnl = (entry_price - exit_px) * pv * qty
-                    trades.append({"entry": round(entry_price, 2), "exit": round(exit_px, 2), "pnl": round(pnl), "type": "short", "entry_idx": int(entry_idx), "exit_idx": int(i), "entry_date": str(df["date"].iloc[entry_idx]), "exit_date": str(df["date"].iloc[i])})
-                    pos = 0
+                    trades.append({"entry": round(entry_price, 2), "exit": round(exit_px, 2), "pnl": round(pnl), "type": "short", "entry_idx": int(entry_idx), "exit_idx": int(i), "entry_date": str(df["date"].iloc[entry_idx]), "exit_date": str(df["date"].iloc[i]), "exit_reason": "stop_loss"})
+                    pos = 0; trail_short = False
         wins = [t['pnl'] for t in trades if t['pnl'] > 0]; losses = [t['pnl'] for t in trades if t['pnl'] <= 0]
         total_pnl = sum(t['pnl'] for t in trades)
         n_wins = len(wins); n_losses = len(losses); n_trades = len(trades)

@@ -1467,8 +1467,8 @@
       updateConnStatus('connected', '实时');
       const variety = data.variety;
       markDataFresh(variety);
-      // 增量更新价格（局部 DOM）+ 浮亏重算
-      updatePriceInCard(variety, data.price);
+      // 增量更新价格（局部 DOM）+ 浮亏重算 + 追踪止损
+      updatePriceInCard(variety, data.price, data);
     });
 
     sseEventSource.addEventListener('heartbeat', (e) => {
@@ -2181,6 +2181,12 @@
             <span style="margin-left:12px">止盈 ${d.take_profit || '—'}</span>
           </div>
 
+          ${(d.trail_active && d.trail_price) ? `
+          <div class="trail-badge" style="display:inline-block;margin-top:5px;padding:3px 8px;background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.4);border-radius:6px;font-size:0.72rem;color:#eab308;font-weight:600">
+            🐢 追踪${d.direction === 'long' ? '多' : '空'}: ${d.trail_price}
+          </div>` : `
+          <div class="trail-badge" style="display:none"></div>`}
+
           ${(d.position_sizing) ? `
           <div style="margin-top:6px;padding:6px 8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);border-radius:8px;font-size:0.78rem">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
@@ -2369,7 +2375,7 @@
   // ── P0-3: 增量 UI 更新（价格变动时触发）──
   // lastPositionsData 由 renderAll() 缓存，connectSSE 在 price_update 时增量更新
   let lastPositionsData = [];
-  function updatePriceInCard(variety, price) {
+  function updatePriceInCard(variety, price, sseData) {
     const card = document.querySelector(`[data-variety="${variety}"]`);
     if (!card || price == null) return;
     // 更新现价
@@ -2403,6 +2409,22 @@
       if (statPnlEl) {
         statPnlEl.textContent = `${totalPnl >= 0 ? '+' : ''}${Math.round(totalPnl).toLocaleString()}`;
         statPnlEl.className = `stat-value ${totalPnl > 0 ? 'positive' : (totalPnl < 0 ? 'negative' : 'neutral')}`;
+      }
+    }
+    // 追踪止损状态更新（SSE实时数据）
+    if (sseData && sseData.trail_active !== undefined) {
+      const trailBadge = card.querySelector('.trail-badge');
+      if (sseData.trail_active && sseData.trail_price) {
+        if (trailBadge) {
+          trailBadge.style.display = '';
+          trailBadge.textContent = `🐢 追踪${sseData.direction === 'long' ? '多' : '空'}: ${sseData.trail_price}`;
+        }
+        // TP刚触发时提醒一次
+        if (sseData.tp_hit && !pos?.trail_active) {
+          triggerAlert('追踪止损已激活', `${sseData.variety} TP已触达，追踪止损线: ${sseData.trail_price}`);
+        }
+      } else if (trailBadge) {
+        trailBadge.style.display = 'none';
       }
     }
     // 标记数据新鲜
