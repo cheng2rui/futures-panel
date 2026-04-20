@@ -1733,6 +1733,7 @@
       const variety = data.variety;
       markDataFresh(variety);
       if (data.is_watchlist) {
+        console.log('📡 SSE watchlist event:', variety, data.price, data.is_watchlist);
         // 自选合约：更新价格并刷新涨跌幅
         updateWatchlistCard(variety, data.price, data);
       } else {
@@ -2202,7 +2203,11 @@
   let _wlRefreshTimer = null;
   async function updateWatchlistCard(variety, newPrice, sseData) {
     const card = document.querySelector(`#watchlist [data-variety="${variety}"]`);
-    if (!card) return;
+    if (!card) {
+      console.log('⚠️ updateWatchlistCard: card not found for', variety);
+      return;
+    }
+    console.log('✅ updateWatchlistCard:', variety, newPrice);
     // 更新现价
     const detailsSpans = card.querySelectorAll('.position-details span');
     detailsSpans.forEach(span => {
@@ -2417,31 +2422,35 @@
   }
 
 // ── Render Functions ────────────────────────────────
+  let renderAllBusy = false;
   async function renderAll() {
-    console.log('🔥 renderAll called');
-    const response = await fetchPositions();
-    const positionsGrid = document.getElementById('positions-grid');
-    const positionsEmpty = document.getElementById('positions-empty');
+    if (renderAllBusy) return;
+    renderAllBusy = true;
+    try {
+      const response = await fetchPositions();
+      const positionsGrid = document.getElementById('positions-grid');
+      const positionsEmpty = document.getElementById('positions-empty');
 
-    // Handle new API response format: {positions: [...], account: {...}}
-    const payload = (typeof response === 'object' && !Array.isArray(response)) ? response : {positions: Array.isArray(response) ? response : [], account: null};
-    const positions = payload.positions || [];
-    const account = payload.account || null;
+      // Handle new API response format: {positions: [...], account: {...}}
+      const payload = (typeof response === 'object' && !Array.isArray(response)) ? response : {positions: Array.isArray(response) ? response : [], account: null};
+      const positions = payload.positions || [];
+      const account = payload.account || null;
 
-    if (!positions || positions.length === 0) {
-      positionsGrid.innerHTML = '';
-      positionsEmpty.style.display = 'block';
-      renderStats(null, null);
-      return;
+      if (!positions || positions.length === 0) {
+        positionsEmpty.style.display = 'block';
+        renderStats(null, null);
+        return;
+      }
+      positionsEmpty.style.display = 'none';
+
+      lastPositionsData = positions;
+      lastAccountData = account;
+      renderPositions(positions);
+      renderStats(positions, account);
+      positions.forEach(p => markDataFresh(p.variety));
+    } finally {
+      renderAllBusy = false;
     }
-    positionsEmpty.style.display = 'none';
-
-    lastPositionsData = positions;
-    lastAccountData = account;
-    renderPositions(positions);
-    renderStats(positions, account);
-    // 标记持仓数据为新鲜
-    positions.forEach(p => markDataFresh(p.variety));
   }
 
   function renderPositions(positions) {

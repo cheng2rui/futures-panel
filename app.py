@@ -1530,15 +1530,23 @@ def check_alerts():
 
     total_bal = acct.get('total_balance', 1_000_000)
     threshold = acct.get('margin_alert_threshold', 80)
+    # ── 一次性抓取所有持仓价格（避免重复串行调用）──
+    _price_cache = {}
+    for p in positions:
+        variety = p.get('variety', '')
+        if variety not in _price_cache:
+            _price_cache[variety] = get_realtime_price(variety)
+
     def _exposed_one(p):
-        cur = (get_realtime_price(p.get('variety', ''))[0] or 0)
+        cur = (_price_cache.get(p.get('variety', ''), (0, None, None))[0] or 0)
         prefix_key = "".join(filter(str.isalpha, p.get('variety', ''))).upper()
         pv = POINT_VALUE.get(prefix_key, 1)
         return cur * pv * p.get('quantity', 1)
+
     total_exposed = sum(_exposed_one(p) for p in positions)
     total_pnl_for_equity = 0
     for p in positions:
-        cur = (get_realtime_price(p.get('variety', ''))[0] or 0)
+        cur = (_price_cache.get(p.get('variety', ''), (0, None, None))[0] or 0)
         if cur and p.get('entry_price'):
             pv = POINT_VALUE.get("".join(filter(str.isalpha, p.get('variety', ''))).upper(), 1)
             qty = p.get('quantity', 1)
@@ -1560,7 +1568,7 @@ def check_alerts():
         qty = pos.get('quantity', 1)
         direction = pos.get('direction', 'long')
         entry = float(pos.get('entry_price', 0))
-        cur_price, _, _ = get_realtime_price(pos.get('variety', ''))
+        cur_price, _, _ = _price_cache.get(pos.get('variety', ''), (None, None, None))
         if cur_price is None:
             continue
         sr = calc_sr_multi_period(pos.get('variety', ''))
@@ -1654,15 +1662,20 @@ def handle_positions():
                 entry_prompt_long = _ri(support + 0.3 * atr) if support else None
                 entry_prompt_short = _ri(resistance - 0.3 * atr) if resistance else None
                 if cur_price != support:
+                    # 计算止损（先算出来再用于 R/R）
                     if direction == 'long':
-                        # 做多 R/R：剩余收益(到阻力) / 风险(入场到支撑)
-                        rr_ratio = round((resistance - entry) / (entry - support), 2) if entry > support else None
-                        stop_loss = _ri(support - 0.5 * (atr_val or 0))
+                        stop_loss = _ri(support - 0.5 * atr)
+                        # R/R = 剩余盈利 / 当前风险（从当前价到止损）
+                        risk = cur_price - stop_loss
+                        reward = resistance - cur_price
+                        rr_ratio = round(reward / risk, 2) if risk > 0 else None
                         take_profit = resistance
                     else:
-                        # 做空 R/R：剩余收益(到支撑) / 风险(入场到阻力)
-                        rr_ratio = round((entry - support) / (resistance - entry), 2) if resistance > entry else None
-                        stop_loss = _ri(resistance + 0.5 * (atr_val or 0))
+                        stop_loss = _ri(resistance + 0.5 * atr)
+                        # R/R = 剩余盈利 / 当前风险（从当前价到止损）
+                        risk = stop_loss - cur_price
+                        reward = cur_price - support
+                        rr_ratio = round(reward / risk, 2) if risk > 0 else None
                         take_profit = support
 
             # ── 追踪止损计算 ──
