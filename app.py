@@ -1366,19 +1366,19 @@ def calc_position_sizing(equity, risk_pct, atr, pv):
     risk_amount = equity * (risk_pct / 100)  # 单笔最大亏损金额
     # 单位 = 账户1%风险 / (1个ATR × 每点价值)
     unit = risk_amount / (atr * pv)
-    unit = max(1.0, round(unit * 10) / 10)  # 至少1手，小数部分四舍五入到0.1手
-    
+    unit = max(1, int(unit))  # 至少1手，向下取整（交易所不支持零碎手）
+
     max_units = 4  # 海龟法则上限
     atr_risk_points = atr  # 止损距离 = 1 ATR
     recommended_size = unit  # 默认开1个单元
     max_size = unit * max_units  # 最大4个单元
-    
+
     return {
-        'unit': round(unit, 1),
+        'unit': unit,
         'max_units': max_units,
-        'max_size': round(max_size, 1),
+        'max_size': max_size,
         'risk_amount': round(risk_amount, 0),
-        'recommended_size': round(recommended_size, 1),  # 手数保留0.1位
+        'recommended_size': recommended_size,  # 整数手
         'atr_risk_points': _ri(atr_risk_points),
         'risk_pct': risk_pct,
         'atr': _ri(atr),
