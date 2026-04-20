@@ -427,16 +427,19 @@ _cleaner_thread.start()
 
 # ── 自选合约实时行情广播（每5秒）──
 def _watchlist_broadcaster():
+    """每5秒强制抓取自选合约价格并推送到所有SSE客户端"""
     while True:
         time.sleep(5)
         try:
             wl = load_watchlist()
             for item in wl:
-                v = item.get('variety', '')
+                v = item if isinstance(item, str) else item.get('variety', '')
                 if not v:
                     continue
-                price, unit, name = get_realtime_price(v)
-                if price:
+                # 强制走网络抓取，不用缓存，直接广播给所有SSE客户端
+                result = _fetch_price_from_sina(v)
+                if result:
+                    price, unit, name = result
                     _broadcast_event('price_update', {
                         'variety': v,
                         'price': price,
