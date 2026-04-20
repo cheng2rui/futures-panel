@@ -1524,8 +1524,15 @@ def handle_alerts():
     _save_account(acct)
     return jsonify({"message": "预警配置已保存", "alerts": acct['alerts']})
 
+_alert_rate_limit = {'last_time': 0.0}  # check_alerts 防重放
+
 @app.route('/api/alerts/check', methods=['GET'])
 def check_alerts():
+    # Rate limit: 5秒内只处理一次，防止重复预警
+    now = time.time()
+    if now - _alert_rate_limit['last_time'] < 5:
+        return jsonify({"alerts": [], "has_alerts": False, "_rate_limited": True})
+    _alert_rate_limit['last_time'] = now
     positions = load_positions()
     if not positions:
         return jsonify({"alerts": [], "has_alerts": False})
@@ -1563,6 +1570,8 @@ def check_alerts():
     current_equity = total_bal + total_pnl_for_equity
     margin_util = (total_exposed / current_equity) * 100 if current_equity > 0 else 0
     if margin_util > 1000:
+        # 权益接近零时杠杆率会暴表（如浮亏导致权益≈0），
+        # 此时用名义本金×10%保证金率估算，避免显示99999%的荒谬数字
         margin_util = (total_exposed * 0.10 / current_equity * 100) if current_equity > 0 else 0
     if alerts.get('leverage_warning', True) and margin_util > threshold:
         fired.append({"type": "LEVERAGE_ALERT", "margin_util_pct": round(margin_util, 1), "threshold": threshold, "level": "warning"})
