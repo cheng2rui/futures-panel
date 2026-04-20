@@ -425,6 +425,30 @@ def _stale_cleaner():
 _cleaner_thread = threading.Thread(target=_stale_cleaner, daemon=True)
 _cleaner_thread.start()
 
+# ── 自选合约实时行情广播（每5秒）──
+def _watchlist_broadcaster():
+    while True:
+        time.sleep(5)
+        try:
+            wl = load_watchlist()
+            for item in wl:
+                v = item.get('variety', '')
+                if not v:
+                    continue
+                price, unit, name = get_realtime_price(v)
+                if price:
+                    _broadcast_event('price_update', {
+                        'variety': v,
+                        'price': price,
+                        'is_watchlist': True,
+                        'name': name,
+                    })
+        except Exception:
+            pass
+
+_watchlist_thread = threading.Thread(target=_watchlist_broadcaster, daemon=True)
+_watchlist_thread.start()
+
 app = Flask(__name__,
             template_folder='/Users/rey/.openclaw/workspace/futures-panel/templates',
             static_folder='/Users/rey/.openclaw/workspace/futures-panel/static')

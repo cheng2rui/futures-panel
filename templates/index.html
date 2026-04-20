@@ -1397,6 +1397,7 @@
   let sseLastMsgTs = 0;          // 最后一条消息时间戳
   let sseLastServerTs = 0;       // 最后服务器时间戳（心跳用）
   let sseStaleTimer = null;
+  let lastWatchlistInfo = {};    // 自选合约数据（用于SSE实时更新）
   const STALE_THRESHOLD_MS = 10000; // 10秒无更新 → 数据置灰
 
   // 全局数据新鲜度映射
@@ -1467,8 +1468,13 @@
       updateConnStatus('connected', '实时');
       const variety = data.variety;
       markDataFresh(variety);
-      // 增量更新价格（局部 DOM）+ 浮亏重算 + 追踪止损
-      updatePriceInCard(variety, data.price, data);
+      if (data.is_watchlist) {
+        // 自选合约：更新价格并刷新涨跌幅
+        updateWatchlistCard(variety, data.price, data);
+      } else {
+        // 持仓：增量更新价格+浮亏重算+追踪止损
+        updatePriceInCard(variety, data.price, data);
+      }
     });
 
     sseEventSource.addEventListener('heartbeat', (e) => {
@@ -1924,6 +1930,58 @@
     }).join('');
     // 标记刚加载的数据为新鲜（防止加载完就被 gray out）
     validQuotes.forEach(q => markDataFresh(q.variety));
+    // 存储自选数据供 SSE 实时更新用
+    validQuotes.forEach(q => lastWatchlistInfo[q.variety] = q);
+  }
+
+  // ── 自选合约 SSE 实时更新 ───────────────────────────────
+  let _wlRefreshTimer = null;
+  async function updateWatchlistCard(variety, newPrice, sseData) {
+    const card = document.querySelector(`#watchlist [data-variety="${variety}"]`);
+    if (!card) return;
+    // 更新现价
+    const detailsSpans = card.querySelectorAll('.position-details span');
+    detailsSpans.forEach(span => {
+      if (span.textContent.startsWith('现')) span.textContent = `现价 ${typeof newPrice === 'number' ? newPrice.toFixed(2) : newPrice}`;
+    });
+    // 尝试获取完整报价刷新涨跌幅（防抖动：500ms 内不重复 fetch）
+    if (_wlRefreshTimer) clearTimeout(_wlRefreshTimer);
+    _wlRefreshTimer = setTimeout(async () => {
+      try {
+        const r = await fetch(`${API}/api/quote/${encodeURIComponent(variety)}`);
+        if (!r.ok) return;
+        const q = await r.json();
+        lastWatchlistInfo[variety] = q;
+        // 更新涨跌幅标签
+        const pnlEl = card.querySelector('.position-pnl');
+        if (pnlEl && q.change_pct != null) {
+          const chg = q.change_pct;
+          const chgClass = chg > 0 ? 'positive' : (chg < 0 ? 'negative' : 'neutral');
+          const chgSign = chg > 0 ? '+' : '';
+          pnlEl.textContent = `${chgSign}${chg}%`;
+          pnlEl.className = `position-pnl ${chgClass}`;
+        }
+        // 更新评分 bar
+        const scoreLong = q.score_long != null ? Math.round(q.score_long) : 0;
+        const bar = card.querySelector('.position-score-bar');
+        if (bar) bar.style.width = `${scoreLong}%`;
+        // 更新 R/R 和支撑/阻力文字
+        const rrLong = q.rr_ratio || null;
+        const supportText = q.support ? `撑 ${q.support}` : '—';
+        const resistText = q.resistance ? `阻 ${q.resistance}` : '—';
+        const infoRow = card.querySelector('.position-info-row');
+        if (infoRow) {
+          const rrLongVal = (q.current_price && q.support && q.resistance && q.current_price > q.support)
+            ? parseFloat(((q.resistance - q.current_price) / (q.current_price - q.support)).toFixed(2)) : null;
+          infoRow.innerHTML = `
+            <span>R/R多 ${rrStars(rrLongVal)}</span>
+            <span>${supportText}</span>
+            <span>${resistText}</span>
+          `;
+        }
+      } catch(e) { console.error('wl refresh error', e); }
+    }, 500);
+    markDataFresh(variety);
   }
 
   // ── Backtest ───────────────────────────────────────
