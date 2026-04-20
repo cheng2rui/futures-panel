@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>期货风控监控</title>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
   <link rel="stylesheet" href="/static/gridstack.min.css">
@@ -734,89 +734,338 @@
       box-shadow: none !important;
     }
 
+    /* ── Mobile ≤768px ── */
     @media (max-width: 768px) {
-      body {
-        height: auto;
-        overflow: auto;
+      /* Gridstack 移动端：强制纵向堆叠 */
+      .grid-stack {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 16px !important;
+        overflow: visible !important;
+        /* 不设 height:auto，让它被 mainGrid 的 overflow-y:auto 裁剪 */
       }
+      .grid-stack > .grid-stack-item {
+        position: relative !important;
+        width: 100% !important;
+        left: auto !important;
+        top: auto !important;
+        transform: none !important;
+        height: auto !important;
+        min-height: 0 !important;
+        flex-shrink: 0 !important;
+        margin: 0 !important;
+        float: none !important;
+      }
+      /* 核心：解除 grid-stack-item-content 的绝对定位，回归文档流 */
+      .grid-stack > .grid-stack-item > .grid-stack-item-content {
+        position: relative !important;
+        top: auto !important;
+        bottom: auto !important;
+        left: auto !important;
+        right: auto !important;
+        height: auto !important;
+        min-height: 0 !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch;
+        display: flex !important;
+        flex-direction: column !important;
+      }
+      .grid-stack .ui-draggable,
+      .grid-stack .ui-resizable { pointer-events: none !important; }
+
+      /* mainGrid：页面级别滚动容器 */
+      #mainGrid {
+        flex: 1 1 0 !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: none;
+        min-height: 0 !important;
+        width: 100% !important;
+        height: auto !important;
+        position: relative !important;
+      }
+
+      body, html {
+        height: 100%;
+        overflow: hidden;
+        -webkit-tap-highlight-color: transparent;
+        overscroll-behavior: none;
+      }
+      /* 禁用hover残留（移动端点击后hover状态不消失）*/
+      *:hover { opacity: 1 !important; }
+
       .main-content {
-        height: auto;
-        min-height: 100vh;
+        height: 100dvh;
+        height: 100vh; /* iOS Safari fallback */
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
       }
+
+      /* 顶部导航 */
       .top-nav {
         padding: 0 12px;
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
         scrollbar-width: none;
-        gap: 2px;
+        scroll-snap-type: x mandatory;
+        gap: 0;
         flex-shrink: 0;
+        border-bottom: 1px solid var(--border);
       }
       .top-nav::-webkit-scrollbar { display: none; }
-      .top-nav-brand { margin-right: 12px; font-size: 0.9rem; }
-      .top-tab { padding: 5px 10px; font-size: 0.8rem; }
-      .top-nav-right { gap: 4px; }
-      .top-nav-right select, .top-nav-right button { padding: 4px 8px; font-size: 0.78rem; }
+      .top-nav { scrollbar-width: none; }
+      .top-nav-brand { margin-right: 12px; font-size: 0.9rem; flex-shrink: 0; }
+      .top-tab {
+        padding: 10px 16px;
+        font-size: 0.85rem;
+        flex-shrink: 0;
+        scroll-snap-align: start;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+      }
+      .top-nav-right { gap: 6px; flex-shrink: 0; }
+      .top-nav-right select, .top-nav-right button { padding: 6px 10px; font-size: 0.78rem; min-height: 36px; }
 
       .main-scroll-area {
         padding: 12px;
-        overflow: visible;
-        flex-grow: 0;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        flex: 1 1 auto;
+        height: 100%;
+        min-height: 0;
       }
 
-      .stat-bar {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 10px;
-        margin-bottom: 16px;
+      /* 导航栏：隐藏4个Tab，用统计数据替代 */
+      .top-nav {
+        padding: 0 8px !important;
+        height: 36px !important;
+        min-height: 36px !important;
+        flex-shrink: 0 !important;
+        justify-content: space-between !important;
       }
-      .stat-card { padding: 12px 14px; }
-      .stat-value { font-size: 22px; }
-      .stat-label { font-size: 11px; }
+      .top-nav-brand { display: none !important; }
+      /* 隐藏4个Tab按钮 */
+      .top-tab { display: none !important; }
+      /* 移动端关键数据（默认隐藏） */
+      .mobile-stats { display: none !important; }
+@media (max-width: 768px) {
+      .mobile-stats { display: flex !important; }
+      .top-nav-right {
+        display: flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+        flex-shrink: 0 !important;
+      }
+      .top-nav-right select, .top-nav-right button {
+        padding: 3px 6px !important;
+        font-size: 0.7rem !important;
+        min-height: 26px !important;
+        border-radius: 6px !important;
+      }
+      .conn-status { padding: 3px 6px !important; font-size: 0.68rem !important; }
 
+      /* stat-bar-container：隐藏 */
+      .stat-bar-container { display: none !important; }
+
+      /* 整体布局：顶部只留导航+关键数据 */
+      .main-content {
+        height: 100dvh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      /* mainGrid 填满全屏 */
+      #mainGrid {
+        flex: 1 1 0 !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch;
+        min-height: 0 !important;
+        width: 100% !important;
+        height: auto !important;
+        position: relative !important;
+      }
+
+      /* 持仓/自选网格：单列 */
       .positions-grid {
         grid-template-columns: 1fr;
-        gap: 12px;
-      }
-
-      .form-grid {
-        grid-template-columns: 1fr;
         gap: 10px;
       }
 
+      /* 持仓卡片：紧凑横向布局 */
+      .position-card {
+        padding: 12px !important;
+        border-radius: 12px !important;
+      }
+      .position-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .position-title { font-size: 15px !important; }
+      .position-pnl { font-size: 16px !important; }
+      .position-details {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 12px;
+        font-size: 13px;
+        margin-bottom: 8px;
+      }
+      .position-info-row {
+        font-size: 12px;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .position-score-bar-wrap { margin: 6px 0; }
+
+      /* 按钮行：44px最小触控区域 */
+      .position-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+      }
+      .position-actions button {
+        flex: 1;
+        min-height: 44px;
+        padding: 0 12px;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .chart-button {
+        background: rgba(59, 130, 246, 0.12) !important;
+        border: 1px solid rgba(59, 130, 246, 0.25) !important;
+        color: var(--blue) !important;
+      }
+      .delete-button {
+        background: rgba(239, 68, 68, 0.1) !important;
+        border: 1px solid rgba(239, 68, 68, 0.25) !important;
+        color: var(--red) !important;
+      }
+
+      /* 仓位建议区：紧凑 */
+      .position-card > div[style*="position_sizing"] { font-size: 12px !important; }
+
+      /* 追踪止损标签 */
+      .trail-badge {
+        display: inline-block !important;
+        font-size: 11px !important;
+        padding: 3px 8px !important;
+      }
+
+      /* 自选：横向列表式 */
       .watchlist-grid {
         grid-template-columns: 1fr;
+        gap: 0;
+      }
+      .watchlist-grid .position-card {
+        flex-direction: row !important;
+        justify-content: space-between;
+        align-items: center;
+        border-radius: 0 !important;
+        border-bottom: 1px solid var(--border);
+        padding: 14px 8px !important;
+        min-width: unset !important;
+      }
+      .watchlist-grid .position-header { margin-bottom: 0; flex: 1; }
+      .watchlist-grid .position-pnl { font-size: 14px !important; }
+      .watchlist-grid .position-details { margin-bottom: 0; }
+      .watchlist-grid .position-score-wrap,
+      .watchlist-grid .position-info-row,
+      .watchlist-grid .position-actions { display: none !important; }
+
+      /* Gridstack 移动端静态 */
+      .grid-stack .ui-draggable,
+      .grid-stack .ui-resizable { pointer-events: none; }
+
+      /* 弹窗全屏 */
+      .modal-content {
+        width: 100vw !important;
+        max-width: 100vw !important;
+        margin: 0 !important;
+        border-radius: 0 !important;
+        height: 100dvh !important;
+        max-height: 100dvh !important;
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+      #chartModal {
+        width: 100vw !important;
+        height: 100dvh !important;
+        max-width: 100vw !important;
+        max-height: 100dvh !important;
+        border-radius: 0 !important;
+        top: 0 !important;
+        left: 0 !important;
+        transform: none !important;
+      }
+      #chartModal .modal-content {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: 100% !important;
+        max-height: 100% !important;
+      }
+      .modal-header {
+        padding: 12px 16px;
+        min-height: 52px;
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+      .modal-close-btn {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .chart-modal-body {
+        flex: 1;
+        overflow: hidden;
+        min-height: 0;
       }
 
+      /* 表单 */
+      .form-grid { grid-template-columns: 1fr; gap: 10px; }
       .header { margin-bottom: 16px; }
       .header-title { font-size: 16px; }
-
-      h2 { font-size: 16px !important; margin-top: 24px !important; }
-
-      .modal-content {
-        width: 95% !important;
-        max-width: 95vw !important;
-        margin: 10px auto !important;
-      }
-
-      #chartModal .modal-content {
-        width: 98% !important;
-        max-height: 85vh;
-      }
-
+      h2 { font-size: 16px !important; margin-top: 20px !important; }
       .settings-section { padding: 10px 12px; }
-      .settings-row { font-size: 13px; }
-      .settings-input { width: 120px; font-size: 13px; }
+      .settings-row { font-size: 13px; flex-wrap: wrap; gap: 6px; }
+      .settings-input { width: 100px; font-size: 13px; }
 
       .top-tab svg { width: 14px; height: 14px; }
+
+      /* 回测结果区 */
+      #backtestResults .position-card { padding: 12px !important; }
+      #backtestResults .position-actions { display: flex !important; }
     }
 
+    /* ── Mobile ≤480px（更小屏幕）── */
     @media (max-width: 480px) {
+      body { min-width: 320px; }
       .stat-bar {
         grid-template-columns: repeat(2, 1fr);
       }
-      .stat-value { font-size: 20px; }
-      .stat-card { padding: 10px 12px; }
-      .main-scroll-area { padding: 10px; }
+      .stat-value { font-size: 18px; }
+      .stat-card { padding: 8px 6px; }
+      .stat-label { font-size: 9px; }
+      .main-scroll-area { padding: 8px; }
       .top-nav { padding: 0 8px; }
+      .top-nav-brand { font-size: 0.8rem; }
+      .top-tab { padding: 8px 12px; font-size: 0.8rem; }
+
+      /* K线图弹窗标题缩小 */
+      #chartTitle { font-size: 14px; }
     }
   </style>
 </head>
@@ -826,12 +1075,21 @@
 
   <!-- Top Navigation -->
   <nav class="top-nav">
-    <div class="top-nav-brand"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> 期货风控</div>
+    <div class="top-nav-brand"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> 期货</div>
+    <!-- 左侧：4个Tab（手机隐藏，PC端保留） -->
     <button class="top-tab active" onclick="switchTab('statPnl', this)">总览</button>
     <button class="top-tab" onclick="switchTab('positions-grid', this)">持仓</button>
     <button class="top-tab" onclick="switchTab('backtest-section', this)">回测</button>
     <button class="top-tab" onclick="switchTab('watchlist-section', this)">自选</button>
+    <!-- 右侧：移动端显示关键数据（PC端隐藏） -->
     <div class="top-nav-right">
+      <!-- 移动端关键数据（PC端隐藏） -->
+      <div class="mobile-stats" style="display:none;align-items:center;gap:12px;font-size:0.72rem;color:var(--text);flex:1;justify-content:flex-end;overflow:hidden;white-space:nowrap">
+        <span>资金:<b id="mobBalance">—</b></span>
+        <span>盈亏:<b id="mobPnl" class="neutral">—</b></span>
+        <span>保证金:<b id="mobMargin">—</b></span>
+        <span>持仓:<b id="mobCount">0</b></span>
+      </div>
       <button class="refresh-button" onclick="renderAll()"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg> 刷新</button>
       <button class="restart-button" onclick="restartServer()"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg> 重启</button>
       <select id="refreshInterval" onchange="setRefreshInterval(this.value)" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-size:0.82rem;font-family:inherit">
@@ -1173,7 +1431,7 @@
   <div class="modal-content">
     <span class="modal-close" onclick="document.getElementById('chartModal').style.display='none';">&times;</span>
     <h2 id="chartTitle" class="modal-title">K线图</h2>
-    <div id="chartContent" class="chart-container">
+    <div id="chartContent" class="chart-container chart-modal-body">
       加载中...
     </div>
   </div>
@@ -1290,6 +1548,12 @@
 
     // 默认禁用拖拽和调整大小（等用户点编辑按钮解锁）
     grid.setStatic(true);
+
+    // 移动端（≤768px）强制禁用拖拽，防止误触
+    const _isMobile = () => window.matchMedia('(max-width: 768px)').matches;
+    if (_isMobile()) {
+      grid.setStatic(true);
+    }
 
     // GridStack ≥10: getLayoutFromDOM uses grid.save() natively
     // Override saveLayout to persist to localStorage
@@ -2358,6 +2622,19 @@
     } else {
         statVar95.textContent = '—';
     }
+
+    // 移动端导航栏数据同步
+    const mobBal = document.getElementById('mobBalance');
+    const mobPnl = document.getElementById('mobPnl');
+    const mobMargin = document.getElementById('mobMargin');
+    const mobCount = document.getElementById('mobCount');
+    if (mobBal) mobBal.textContent = account ? (account.total_balance || 0).toLocaleString() : '—';
+    if (mobPnl) {
+      mobPnl.textContent = `${totalPnl > 0 ? '+' : ''}${totalPnl.toLocaleString()}`;
+      mobPnl.className = totalPnl > 0 ? 'positive' : (totalPnl < 0 ? 'negative' : 'neutral');
+    }
+    if (mobMargin && account) mobMargin.textContent = (account.margin_util_pct || 0) + '%';
+    if (mobCount) mobCount.textContent = count;
   }
 
   // ── Alert System ─────────────────────────────────
@@ -2498,6 +2775,16 @@
     chartTitle.textContent = `${variety} K线图（60日）`;
     chartContent.innerHTML = '<div style="text-align:center;padding:80px;color:var(--text-dim)">加载中...</div>';
     chartModal.style.display = 'flex';
+    // 移动端全屏打开后触发 Plotly resize
+    if (window.matchMedia('(max-width: 768px)').matches) {
+      chartModal.style.display = ''; // 触发 reflow
+      requestAnimationFrame(() => {
+        chartModal.style.display = 'flex';
+        setTimeout(() => {
+          if (window.Plotly) Plotly.Plots.resize('chartContent');
+        }, 100);
+      });
+    }
     // Store data on modal for theme toggle to re-render
     chartModal.dataset.variety = variety;
     chartModal.dataset.entryPrice = entry_price;
