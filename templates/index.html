@@ -2218,12 +2218,28 @@
       return;
     }
     console.log('✅ updateWatchlistCard:', variety, newPrice);
-    // 更新现价
+    // 现价更新（立即）
     const detailsSpans = card.querySelectorAll('.position-details span');
     detailsSpans.forEach(span => {
       if (span.textContent.startsWith('现')) span.textContent = `现价 ${typeof newPrice === 'number' ? newPrice.toFixed(2) : newPrice}`;
     });
-    // 尝试获取完整报价刷新涨跌幅（防抖动：500ms 内不重复 fetch）
+    // badge 更新（立即使用 SSE 完整数据，不再等 500ms fetch）
+    const pnlEl = card.querySelector('.position-pnl');
+    if (pnlEl && sseData) {
+      const chg = sseData.change_pct != null ? sseData.change_pct : 0;
+      if (chg === 0) {
+        const belowLong = sseData.entry_prompt_long && sseData.current_price < sseData.entry_prompt_long;
+        const aboveShort = sseData.entry_prompt_short && sseData.current_price > sseData.entry_prompt_short;
+        if (belowLong) { pnlEl.textContent = '🟢 做多机会'; pnlEl.className = 'position-pnl positive'; }
+        else if (aboveShort) { pnlEl.textContent = '🔴 做空机会'; pnlEl.className = 'position-pnl negative'; }
+        else { pnlEl.textContent = '—'; pnlEl.className = 'position-pnl neutral'; }
+      } else {
+        const chgClass = chg > 0 ? 'positive' : 'negative';
+        pnlEl.textContent = `${(chg > 0 ? '+' : '')}${chg}%`;
+        pnlEl.className = `position-pnl ${chgClass}`;
+      }
+    }
+    // 防抖动 fetch：更新评分 bar / R/R / 支撑阻力
     if (_wlRefreshTimer) clearTimeout(_wlRefreshTimer);
     _wlRefreshTimer = setTimeout(async () => {
       try {
@@ -2231,22 +2247,6 @@
         if (!r.ok) return;
         const q = await r.json();
         lastWatchlistInfo[variety] = q;
-        // 更新涨跌幅标签（change_pct 为0时显示入场机会提示）
-        const pnlEl = card.querySelector('.position-pnl');
-        if (pnlEl) {
-          const chg = q.change_pct != null ? q.change_pct : 0;
-          if (chg === 0) {
-            const belowLong = q.entry_prompt_long && q.current_price < q.entry_prompt_long;
-            const aboveShort = q.entry_prompt_short && q.current_price > q.entry_prompt_short;
-            if (belowLong) { pnlEl.textContent = '🟢 做多机会'; pnlEl.className = 'position-pnl positive'; }
-            else if (aboveShort) { pnlEl.textContent = '🔴 做空机会'; pnlEl.className = 'position-pnl negative'; }
-            else { pnlEl.textContent = '—'; pnlEl.className = 'position-pnl neutral'; }
-          } else {
-            const chgClass = chg > 0 ? 'positive' : 'negative';
-            pnlEl.textContent = `${(chg > 0 ? '+' : '')}${chg}%`;
-            pnlEl.className = `position-pnl ${chgClass}`;
-          }
-        }
         // 更新评分 bar
         const scoreLong = q.score_long != null ? Math.round(q.score_long) : 0;
         const bar = card.querySelector('.position-score-bar');

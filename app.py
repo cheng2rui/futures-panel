@@ -335,6 +335,32 @@ def _fetch_price_from_sina(variety: str) -> tuple | None:
     # 策略2：直接解析 Sina hq 接口（akshare 失败时的备用）
     return _fetch_price_from_sina_direct(variety, prefix, suffix, meta)
 
+def _fetch_preclose_from_sina(variety: str) -> float | None:
+    """从 Sina hq 接口抓取前一交易日收盘价（parts[2]）"""
+    try:
+        prefix = "".join(filter(str.isalpha, variety))
+        suffix = "".join(filter(str.isdigit, variety))
+        key = _resolve_variety_key(prefix)
+        meta = VARIETY_META_LOWER.get(key) if key else None
+        if not meta:
+            return None
+        direct_sym = f"nf_{prefix.upper()}{suffix}"
+        import requests
+        r = requests.get(
+            f"https://hq.sinajs.cn/list={direct_sym}",
+            headers={"Referer": "https://finance.sina.com.cn",
+                     "User-Agent": "Mozilla/5.0"},
+            timeout=5
+        )
+        r.encoding = "gb2312"
+        val = r.text.split('=')[1].strip('";\n ')
+        parts = val.split(',')
+        if len(parts) > 2:
+            return float(parts[2])
+        return None
+    except:
+        return None
+
 def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) -> tuple | None:
     """备用：直接请求 Sina hq.sinajs.cn，绕过 akshare 的 demjson 解析器"""
     try:
@@ -441,16 +467,30 @@ def _watchlist_broadcaster():
                 v = item if isinstance(item, str) else item.get('variety', '')
                 if not v:
                     continue
-                # 强制走网络抓取，不用缓存，直接广播给所有SSE客户端
+                # 强制走网络抓取，直接广播给所有SSE客户端（带完整字段供前端badge判断）
                 result = _fetch_price_from_sina(v)
                 if result:
                     price, unit, name = result
-                    _broadcast_event('price_update', {
+                    # change_pct：从前一天结算价计算
+                    preclose = _fetch_preclose_from_sina(v)
+                    change_pct = round((price - preclose) / preclose * 100, 2) if preclose and preclose != 0 else 0
+                    # entry_prompt：从支撑/阻力推算（需先算支撑阻力）
+                    sr = calc_sr_multi_period(v)
+                    support, resistance = sr[0], sr[1]
+                    atr = sr[5] or 0
+                    entry_prompt_long = round(support + 0.3 * atr, 2) if support else None
+                    entry_prompt_short = round(resistance - 0.3 * atr, 2) if resistance else None
+                    payload = {
                         'variety': v,
                         'price': price,
                         'is_watchlist': True,
                         'name': name,
-                    })
+                        'change_pct': change_pct,
+                        'entry_prompt_long': entry_prompt_long,
+                        'entry_prompt_short': entry_prompt_short,
+                        'current_price': price,
+                    }
+                    _broadcast_event('price_update', payload)
         except Exception as e:
             print(f"[_watchlist_broadcaster] 异常: {e}")
 
