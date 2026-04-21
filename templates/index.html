@@ -2106,8 +2106,18 @@
     }
     container.innerHTML = validQuotes.map(q => {
       const chg = q.change_pct != null ? q.change_pct : 0;
-      const chgClass = chg > 0 ? 'positive' : (chg < 0 ? 'negative' : 'neutral');
-      const chgSign = chg > 0 ? '+' : '';
+      // change_pct 为0或空时，显示入场机会提示
+      let badgeText, badgeClass;
+      if (chg === 0) {
+        const belowLong = q.entry_prompt_long && q.current_price < q.entry_prompt_long;
+        const aboveShort = q.entry_prompt_short && q.current_price > q.entry_prompt_short;
+        if (belowLong) { badgeText = '🟢 做多机会'; badgeClass = 'positive'; }
+        else if (aboveShort) { badgeText = '🔴 做空机会'; badgeClass = 'negative'; }
+        else { badgeText = '—'; badgeClass = 'neutral'; }
+      } else {
+        badgeText = `${(chg > 0 ? '+' : '')}${chg}%`;
+        badgeClass = chg > 0 ? 'positive' : 'negative';
+      }
       const scoreLong = q.score_long != null ? Math.round(q.score_long) : null;
       const scoreShort = q.score_short != null ? Math.round(q.score_short) : null;
       const slLabel = scoreLong !== null
@@ -2133,8 +2143,8 @@
             <div class="position-title">
               ${q.variety} <span style="font-size:14px;color:var(--text-dim)">${q.name || ''}</span>
             </div>
-            <div class="position-pnl ${chgClass}">
-              ${chgSign}${chg}%
+            <div class="position-pnl ${badgeClass}">
+              ${badgeText}
             </div>
           </div>
           <div class="position-details">
@@ -2221,14 +2231,21 @@
         if (!r.ok) return;
         const q = await r.json();
         lastWatchlistInfo[variety] = q;
-        // 更新涨跌幅标签
+        // 更新涨跌幅标签（change_pct 为0时显示入场机会提示）
         const pnlEl = card.querySelector('.position-pnl');
-        if (pnlEl && q.change_pct != null) {
-          const chg = q.change_pct;
-          const chgClass = chg > 0 ? 'positive' : (chg < 0 ? 'negative' : 'neutral');
-          const chgSign = chg > 0 ? '+' : '';
-          pnlEl.textContent = `${chgSign}${chg}%`;
-          pnlEl.className = `position-pnl ${chgClass}`;
+        if (pnlEl) {
+          const chg = q.change_pct != null ? q.change_pct : 0;
+          if (chg === 0) {
+            const belowLong = q.entry_prompt_long && q.current_price < q.entry_prompt_long;
+            const aboveShort = q.entry_prompt_short && q.current_price > q.entry_prompt_short;
+            if (belowLong) { pnlEl.textContent = '🟢 做多机会'; pnlEl.className = 'position-pnl positive'; }
+            else if (aboveShort) { pnlEl.textContent = '🔴 做空机会'; pnlEl.className = 'position-pnl negative'; }
+            else { pnlEl.textContent = '—'; pnlEl.className = 'position-pnl neutral'; }
+          } else {
+            const chgClass = chg > 0 ? 'positive' : 'negative';
+            pnlEl.textContent = `${(chg > 0 ? '+' : '')}${chg}%`;
+            pnlEl.className = `position-pnl ${chgClass}`;
+          }
         }
         // 更新评分 bar
         const scoreLong = q.score_long != null ? Math.round(q.score_long) : 0;
