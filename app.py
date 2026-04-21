@@ -515,7 +515,7 @@ def internal_error(error):
     return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
 
 # 实时行情缓存（已统一60秒TTL，akshare慢，减少穿透）
-INACTIVE_CONTRACTS = {'PS', 'TL', 'BR'}
+INACTIVE_CONTRACTS = {'PS', 'TL', 'BR', 'PX'}  # PX: akshare不支持，fallback走Sina nf_px可取到
 _market_cache = CircuitBreakerCache(ttl_price=60, ttl_market=60, ttl_kline=300)
 
 # ── 账户资金配置 ─────────────────────────────────────────
@@ -1899,6 +1899,125 @@ def api_position_sizing():
     sizing['variety'] = variety.upper() if variety else None
     sizing['equity'] = equity
     return jsonify(sizing)
+
+# ── 扫描机会 ─────────────────────────────────────────────
+# 成交稀少的品种，排除在扫描之外
+ILLIQUID_KEYS = {
+    # INE 能源（成交稀少/人民币挂钩波动小）
+    'ec', 'lu',
+    # DCE 成交稀少
+    'fb', 'bb', 'lg',
+    # CZCE 成交稀少/仅长期合约
+    'pm', 'ri', 'lr', 'jr', 'rs', 'wh', 'zc',
+    # SHFE 成交稀少/不活跃
+    'wr', 'fu', 'ad', 'op',
+    # GFEX 成交稀少
+    'pd', 'pt',
+    # CZCE akshare不支持实时行情
+    'ma', 'pg',
+}
+
+@app.route('/api/scan/opportunities', methods=['GET'])
+def api_scan_opportunities():
+    """
+    扫描所有活跃品种，寻找符合入场条件的合约：
+    - 做多机会：现价 < entry_prompt_long（支撑 + 0.3*ATR）
+    - 做空机会：现价 > entry_prompt_short（阻力 - 0.3*ATR）
+    排除 ILLIQUID_KEYS 中的品种，以及成交持仓为0的合约。
+    返回按机会强度（R/R比）排序的列表。
+    """
+    import akshare as ak
+    opportunities = []
+    failed = []
+    _seen_contracts = set()  # 去重：防止同一合约被多个品种映射（如L和PP都映射到"塑料"）
+
+    # 遍历所有品种（排除不活跃的）
+    for key, meta in VARIETY_META.items():
+        key_l = key.lower()
+        if key_l in ILLIQUID_KEYS:
+            continue
+        # 品种中文名
+        name_cn = meta[0]
+        sina_sym = meta[1]  # Sina 接口品种名
+
+        try:
+            # 获取该品种所有活跃合约，取成交量最大者
+            df = ak.futures_zh_realtime(symbol=sina_sym)
+            if df is None or df.empty:
+                failed.append((key, name_cn, '无数据'))
+                continue
+            # 过滤：排除"连续"合约（符号以单个0结尾，如RB0/L0/V0），取持仓量最大的具体月合约
+            df2 = df[
+                df['position'].apply(lambda x: float(x) if x is not None else 0) > 0
+            ].copy()
+            df2['_sym'] = df2['symbol'].astype(str)
+            # 排除连续合约：符号以单个0结尾（非日期数字，如RB0/L0，不含2610/2607）
+            df2 = df2[df2['_sym'].apply(lambda s: not (s[-1] == '0' and not s[-2:].isdigit()))]
+            if df2.empty:
+                failed.append((key, name_cn, '无持仓(仅连续合约)'))
+                continue
+            best = df2.sort_values('position', ascending=False).iloc[0]
+            contract = str(best['symbol'])          # 如 'RB2610'（非RB0）
+            cur_price = float(best['trade'])
+            vol = int(best.get('volume', 0) or 0)
+            pos = int(best.get('position', 0) or 0)
+
+            # 同一合约可能被多个品种映射（如L/PP都查询"塑料"），去重
+            if contract in _seen_contracts:
+                continue
+            _seen_contracts.add(contract)
+
+            # 计算支撑阻力
+            sr = calc_sr_multi_period(contract)
+            support, resistance = sr[0], sr[1]
+            atr_val = sr[5]
+            if support is None or resistance is None or atr_val is None or atr_val <= 0:
+                failed.append((key, name_cn, '指标缺失'))
+                continue
+
+            entry_long = round(support + 0.3 * atr_val, 2)
+            entry_short = round(resistance - 0.3 * atr_val, 2)
+
+            # 判断机会类型
+            opp_type = None
+            if cur_price < entry_long:
+                opp_type = '做多机会'
+                rr_ratio = round((resistance - cur_price) / (cur_price - (support - 0.5 * atr_val)), 2) if cur_price != (support - 0.5 * atr_val) else None
+                entry_rr = round((resistance - cur_price) / (cur_price - entry_long), 2) if cur_price != entry_long else None
+            elif cur_price > entry_short:
+                opp_type = '做空机会'
+                rr_ratio = round((cur_price - support) / ((resistance + 0.5 * atr_val) - cur_price), 2) if (resistance + 0.5 * atr_val) != cur_price else None
+                entry_rr = round((cur_price - support) / (entry_short - cur_price), 2) if entry_short != cur_price else None
+
+            if opp_type is None:
+                continue  # 无机会
+
+            opportunities.append({
+                'variety': contract,
+                'name': name_cn,
+                'exchange': meta[2],
+                'current_price': cur_price,
+                'support': support,
+                'resistance': resistance,
+                'atr': round(atr_val, 2),
+                'entry_prompt_long': entry_long,
+                'entry_prompt_short': entry_short,
+                'opp_type': opp_type,
+                'rr_ratio': rr_ratio,
+                'volume': vol,
+                'position': pos,
+            })
+        except Exception as e:
+            failed.append((key, name_cn, str(e)[:30]))
+
+    # 按 R/R 降序排列
+    opportunities.sort(key=lambda x: x.get('rr_ratio') or 0, reverse=True)
+    return jsonify({
+        'opportunities': opportunities,
+        'total': len(opportunities),
+        'failed_count': len(failed),
+        'failed_sample': failed[:10],  # 最多显示10个失败样本
+    })
 
 @app.route('/api/quote/<variety>', methods=['GET'])
 def quote_variety(variety):

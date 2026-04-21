@@ -1356,6 +1356,7 @@
           <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
             <input type="text" id="watchInput" placeholder="输入合约如 AU2606" onkeydown="if(event.key==='Enter')addToWatchlist()" style="flex:1;min-width:120px;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-size:0.9rem;font-family:inherit">
             <button onclick="addToWatchlist()" style="padding:8px 16px;background:var(--blue);color:#fff;border:none;border-radius:8px;font-size:0.85rem;cursor:pointer;white-space:nowrap">+ 添加自选</button>
+            <button onclick="openScanModal()" style="padding:8px 16px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:0.85rem;cursor:pointer;white-space:nowrap">🔍 扫描机会</button>
           </div>
           <div id="watchlist" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-start"></div>
           <div id="watchlist-empty" style="color:var(--text-dim);font-size:0.85rem;padding:12px 0">暂无自选合约，添加一个开始关注</div>
@@ -1426,7 +1427,26 @@
   </div>
 </div>
 
-<!-- K-Line Chart Modal -->
+<!-- Scan Opportunities Modal -->
+<div id="scanModal" class="modal" onclick="if(event.target.id==='scanModal')closeScanModal()">
+  <div class="modal-content" style="max-width:600px;max-height:80vh;display:flex;flex-direction:column">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:16px;font-weight:600">🔍 入场机会扫描</div>
+        <div id="scanMsg" style="font-size:12px;color:var(--text-dim);margin-top:2px">扫描中，请稍候...</div>
+      </div>
+      <span class="modal-close" onclick="closeScanModal()">&times;</span>
+    </div>
+    <div id="scanResults" style="flex:1;overflow-y:auto;padding:12px 20px">
+      <!-- 动态填充 -->
+    </div>
+    <div class="modal-footer" style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end">
+      <button onclick="closeScanModal()" style="padding:8px 20px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);cursor:pointer;font-size:14px">关闭</button>
+      <button id="scanAddBtn" onclick="addSelectedOpportunities()" disabled style="padding:8px 24px;border-radius:8px;border:none;background:var(--blue);color:#fff;cursor:pointer;font-size:14px;font-weight:600;opacity:0.5">加入自选 (0)</button>
+    </div>
+  </div>
+</div>
+
 <div id="chartModal" class="modal" onclick="if(event.target.id === 'chartModal') this.style.display = 'none';">
   <div class="modal-content">
     <span class="modal-close" onclick="document.getElementById('chartModal').style.display='none';">&times;</span>
@@ -1878,7 +1898,94 @@
     }
   }
 
-  async function toggleSound() {
+  async function openScanModal() {
+    document.getElementById('scanModal').style.display = 'flex';
+    document.getElementById('scanResults').innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">🔍 扫描中...</div>';
+    document.getElementById('scanMsg').textContent = '扫描中，请稍候...';
+    document.getElementById('scanAddBtn').disabled = true;
+    document.getElementById('scanAddBtn').textContent = '加入自选 (0)';
+    window._scanSelected = new Set();
+    try {
+      const r = await fetch(`${API}/api/scan/opportunities`);
+      const data = await r.json();
+      const ops = data.opportunities || [];
+      document.getElementById('scanMsg').textContent = `共 ${ops.length} 个机会，${data.failed_count} 个品种扫描失败`;
+      if (ops.length === 0) {
+        document.getElementById('scanResults').innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">暂无符合入场条件的品种</div>';
+        return;
+      }
+      const html = `<div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto">` +
+        ops.map(o => {
+          const isLong = o.opp_type === '做多机会';
+          const cls = isLong ? 'positive' : 'negative';
+          const badge = isLong ? '🟢 做多' : '🔴 做空';
+          const entry = isLong ? o.entry_prompt_long : o.entry_prompt_short;
+          const distPct = isLong
+            ? ((o.current_price / entry - 1) * 100).toFixed(2)
+            : ((o.current_price / entry - 1) * 100).toFixed(2);
+          const distSign = distPct > 0 ? '+' : '';
+          return `
+            <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface-2);border-radius:10px;border:1px solid var(--border)">
+              <input type="checkbox" id="scan_${o.variety}" onchange="toggleScanItem('${o.variety}', this.checked)" style="width:16px;height:16px;cursor:pointer;flex-shrink:0">
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                  <span style="font-weight:600;font-size:14px">${o.variety}</span>
+                  <span style="font-size:12px;color:var(--text-dim)">${o.name}</span>
+                  <span class="position-pnl ${cls}" style="font-size:12px;padding:2px 8px;border-radius:6px">${badge}</span>
+                </div>
+                <div style="font-size:12px;color:var(--text-dim);margin-top:3px">
+                  现价 <b style="color:var(--text)">${o.current_price}</b>
+                  vs 入场 <b style="color:var(--text)">${entry}</b>
+                  <span style="color:${distPct > 0 ? 'var(--green)' : 'var(--red)'}">(${distSign}${distPct}%)</span>
+                  &nbsp;|&nbsp; 支撑 ${o.support} / 阻力 ${o.resistance}
+                  &nbsp;|&nbsp; R/R=${o.rr_ratio} ATR=${o.atr}
+                </div>
+              </div>
+            </div>`;
+        }).join('') + '</div>';
+      document.getElementById('scanResults').innerHTML = html;
+    } catch(e) {
+      document.getElementById('scanResults').innerHTML = `<div style="text-align:center;padding:40px;color:var(--red)">扫描失败: ${e.message}</div>`;
+      document.getElementById('scanMsg').textContent = '扫描失败';
+    }
+  }
+
+  function closeScanModal() {
+    document.getElementById('scanModal').style.display = 'none';
+  }
+
+  function toggleScanItem(variety, checked) {
+    if (checked) window._scanSelected.add(variety);
+    else window._scanSelected.delete(variety);
+    const btn = document.getElementById('scanAddBtn');
+    const count = window._scanSelected.size;
+    btn.disabled = count === 0;
+    btn.textContent = `加入自选 (${count})`;
+    btn.style.opacity = count === 0 ? '0.5' : '1';
+  }
+
+  async function addSelectedOpportunities() {
+    const selected = Array.from(window._scanSelected || []);
+    if (selected.length === 0) return;
+    const btn = document.getElementById('scanAddBtn');
+    btn.disabled = true;
+    btn.textContent = '添加中...';
+    let added = 0, failed = 0;
+    for (const variety of selected) {
+      try {
+        const r = await fetch(`${API}/api/watchlist`, {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ variety })
+        });
+        if (r.ok) added++;
+        else failed++;
+      } catch(e) { failed++; }
+    }
+    btn.textContent = `✓ 已添加 ${added} 个${failed > 0 ? ', 失败 ' + failed : ''}`;
+    setTimeout(() => { closeScanModal(); renderWatchlist(); }, 1200);
+  }
+
     soundEnabled = !soundEnabled;
     const icon = document.getElementById('soundIcon');
     if (soundEnabled) {
