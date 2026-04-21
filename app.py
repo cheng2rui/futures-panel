@@ -383,6 +383,12 @@ def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) 
         if len(parts) < 4:
             return None
         price = float(parts[3])
+        preclose = float(parts[2]) if len(parts) > 2 else 0
+        # field[3] 与前结算几乎相等时（如 PX 合约），说明 field[3] 是昨日结算；用 field[6] 当今日现价
+        if preclose > 0 and abs(price - preclose) < 50 and len(parts) > 6:
+            alt = float(parts[6])
+            if alt > 0 and abs(alt - preclose) > 50:
+                price = alt
         return (price, meta[2], meta[0])
     except Exception as e:
         # print(f"Sina direct fallback 失败 {variety}: {e}")  # 太吵，注释掉
