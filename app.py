@@ -18,7 +18,7 @@ import pandas as pd
 import numpy as np
 
 # 文件读写锁（防止并发写入竞争）
-_positions_lock = threading.Lock()
+_positions_lock = threading.RLock()  # 重入锁，允许嵌套调用
 _watchlist_lock = threading.Lock()
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
