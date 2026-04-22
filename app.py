@@ -1,9 +1,7 @@
-# 版本: v0.2.11（2026-04-22）
-# 修复: (1) SSE连接从list改为dict，O(1)删除，死连接主动摘除
-#       (2) _broadcast_event 持锁优化，锁外逐个投递，慢客户端不阻塞
-#       (3) SSE有界队列maxsize=50，队列满主动摘除慢客户端
-#       (4) 预警防重放加锁线程安全（_alert_rate_lock）
-#       (5) 自选广播：文件变更检测+ThreadPoolExecutor并发抓取
+# 版本: v0.2.12（2026-04-22）
+# 新增: 扫市场机会扫描 API（/api/scan_opportunities）
+#       条件：①接近入场价 ②MACD背离+KDJ共振 ③双边R/R>2
+#       前端：扫市场按钮 + 机会列表 + 加入自选
 # ─────────────────────────────────────────────
 import json
 import os
@@ -2433,6 +2431,120 @@ def restart_server():
     t = threading.Thread(target=do_restart, daemon=True)
     t.start()
     return jsonify({'message': 'Restarting...'})
+
+# 扫市场机会扫描（v0.2.12）
+# 条件：①接近入场价(偏离<2%) ②MACD背离+KDJ超买超卖共振 ③双边R/R>2
+_opportunities_cache = {'items': [], 'ts': 0.0}
+_opportunities_lock = threading.Lock()
+
+@app.route('/api/scan_opportunities', methods=['GET'])
+def api_scan_opportunities():
+    now = time.time()
+    # 缓存60秒，避免频繁扫描
+    with _opportunities_lock:
+        if _opportunities_cache['items'] and (now - _opportunities_cache['ts']) < 60:
+            return jsonify({"cached": True, "count": len(_opportunities_cache['items']), "items": _opportunities_cache['items']})
+
+    results = []
+    # 从 VARIETY_META 取出所有品种（排除非活跃）
+    all_varieties = list(VARIETY_META.keys())
+    
+    def scan_one(meta_key):
+        """扫描单个品种机会，meta_key 如 'TA' 或 'cu'"""
+        try:
+            prefix_upper = meta_key.upper()
+            if prefix_upper in INACTIVE_CONTRACTS:
+                return None
+
+            # 构造当前主力合约名（如 TA2610）让 Sina hq 接口正确返回
+            suffix = ""
+            try:
+                now_month = datetime.datetime.now().strftime('%y%m')
+                suffix = now_month
+                variety_full = f"{prefix_upper}{suffix}"  # e.g. TA2610
+            except Exception:
+                variety_full = prefix_upper
+
+            # 用 get_realtime_price 抓价格（内部走 Sina hq，akshare 作备用）
+            price, unit, name = get_realtime_price(variety_full)
+            if price is None or price <= 0:
+                return None
+
+            # calc_sr_multi_period 接受带后缀的合约名（内部用 prefix 匹配）
+            sr = calc_sr_multi_period(variety_full)
+            if not sr or sr[0] is None:
+                return None
+
+            support, resistance, k_val, d_val, j_val, atr_val, oi_change, bb_pos, macd_h, vol_ratio, ma5_above_ma20, div_type, div_strength = sr
+            if support is None or resistance is None:
+                return None
+
+            atr = atr_val or 0
+            entry_long = round(support - 0.3 * atr, 2) if support else None
+            entry_short = round(resistance + 0.3 * atr, 2) if resistance else None
+
+            reasons = []
+            # 条件1：接近入场价（偏离 < 2%）
+            if entry_long and price > 0:
+                dev_long = abs(price - entry_long) / entry_long
+                if dev_long < 0.02:
+                    reasons.append({"type": "near_entry", "side": "long", "entry": entry_long, "dev_pct": round(dev_long * 100, 1)})
+            if entry_short and price > 0:
+                dev_short = abs(price - entry_short) / entry_short
+                if dev_short < 0.02:
+                    reasons.append({"type": "near_entry", "side": "short", "entry": entry_short, "dev_pct": round(dev_short * 100, 1)})
+
+            # 条件2：MACD背离 + KDJ超买超卖共振
+            if div_type != 0 and div_strength and div_strength > 0:
+                kk = k_val or 0
+                kd = d_val or 0
+                if kk <= 25 or kd <= 25 or kk >= 75 or kd >= 75:
+                    tag = "底背离+KDJ超卖" if div_type == 1 else "顶背离+KDJ超买"
+                    reasons.append({"type": "div_kdj", "text": tag, "div_type": div_type, "div_strength": round(div_strength, 1)})
+
+            # 条件3：R/R 双向 > 2
+            if price != support:
+                rr_l = (resistance - price) / (price - support) if (price > support) else None
+                rr_s = (price - support) / (resistance - price) if (price < resistance) else None
+                if rr_l is not None and rr_s is not None and rr_l > 2 and rr_s > 2:
+                    reasons.append({"type": "double_rr", "rr_long": round(rr_l, 2), "rr_short": round(rr_s, 2)})
+
+            if not reasons:
+                return None
+
+            return {
+                "variety": prefix_upper,
+                "name": name,
+                "current_price": round(price, 2),
+                "support": support,
+                "resistance": resistance,
+                "entry_prompt_long": entry_long,
+                "entry_prompt_short": entry_short,
+                "kdj_k": round(k_val, 1) if k_val else None,
+                "kdj_d": round(d_val, 1) if d_val else None,
+                "atr": round(atr, 2) if atr else None,
+                "reasons": reasons,
+            }
+        except Exception as e:
+            return None
+
+    # 并发扫描所有品种（15线程，30秒超时）
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(scan_one, v): v for v in all_varieties}
+        for fut in as_completed(futures, timeout=30):
+            r = fut.result()
+            if r:
+                results.append(r)
+
+    # 按条件数量降序排列
+    results.sort(key=lambda x: (-len(x['reasons']), x['variety']))
+
+    with _opportunities_lock:
+        _opportunities_cache['items'] = results
+        _opportunities_cache['ts'] = time.time()
+
+    return jsonify({"count": len(results), "items": results})
 
 if __name__ == '__main__':
     # 启动时后台预热持仓日线（避免首次访问卡顿）
