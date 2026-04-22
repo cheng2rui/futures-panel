@@ -1103,7 +1103,7 @@
     <button class="top-tab active" onclick="switchTab('statPnl', this)">总览</button>
     <button class="top-tab" onclick="switchTab('positions-grid', this)">持仓</button>
     <button class="top-tab" onclick="switchTab('backtest-section', this)">回测</button>
-    <button class="top-tab" onclick="switchTab('watchlist-section', this)">自选</button>
+    <button class="top-tab" onclick="switchTab('watchlist', this)">自选</button>
     <!-- 右侧：移动端显示关键数据（PC端隐藏） -->
     <div class="top-nav-right">
       <!-- 移动端关键数据（PC端隐藏） -->
@@ -1365,7 +1365,7 @@
 
   </div>
     <!-- 自选合约 Widget -->
-    <div class="grid-stack-item gs-widget" gs-id="watchlist" gs-x="0" gs-y="6" gs-w="12" gs-h="4" gs-min-w="4" gs-max-h="8">
+    <div id="watchlist-widget" class="grid-stack-item gs-widget" gs-id="watchlist" gs-x="0" gs-y="6" gs-w="12" gs-h="4" gs-min-w="4" gs-max-h="8">
       <div class="grid-stack-item-content" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:0;display:flex;flex-direction:column">
         <div class="widget-drag-handle">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
@@ -2244,7 +2244,7 @@
   // ── 自选合约 SSE 实时更新 ───────────────────────────────
   let _wlRefreshTimer = null;
   async function updateWatchlistCard(variety, newPrice, sseData) {
-    const card = document.querySelector(`#watchlist [data-variety="${variety}"]`);
+    const card = document.querySelector(`#watchlist-widget [data-variety="${variety}"]`);
     if (!card) {
       console.log('⚠️ updateWatchlistCard: card not found for', variety);
       return;
