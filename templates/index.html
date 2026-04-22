@@ -124,11 +124,7 @@
       0%,100% { opacity: 1; box-shadow: 0 0 6px rgba(239,68,68,0.5); }
       50% { opacity: 0.7; box-shadow: 0 0 12px rgba(239,68,68,0.8); }
     }
-    @keyframes blink-badge {
-      0%,100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.6; transform: scale(0.92); }
-    }
-    @keyframes blink {
+}
       0%,100% { opacity: 1; } 50% { opacity: 0.2; }
     }
 
@@ -2174,7 +2170,6 @@
         </div>` : '';
       return `
         <div class="position-card" style="min-width:280px;flex:1;position:relative" data-variety="${q.variety}">
-          ${(longSignal?.triggered || shortSignal?.triggered) ? '<div style="position:absolute;top:8px;right:8px;font-size:0.65rem;padding:2px 6px;border-radius:8px;font-weight:700;animation:blink-badge 0.8s infinite"></div>' : ''}
           <div class="position-header">
             <div class="position-title">
               ${q.variety} <span style="font-size:14px;color:var(--text-dim)">${q.name || ''}</span>
