@@ -1,4 +1,4 @@
-<!-- 版本: v0.3.1（2026-04-23）修复: 自选删除按钮·指标null时R/R/入场提示隐藏·SSE刷新保护 -->
+<!-- 版本: v0.3.2（2026-04-23）新增: 扫市场排序+筛选+已在自选状态 -->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -3089,9 +3089,17 @@
     modal.style.display = 'flex';
     document.getElementById('scanModalBody').innerHTML = '<div style="text-align:center;padding:30px;color:var(--text-dim)">🔍 扫描全市场中...</div>';
     try {
-      const res = await fetch(`${API}/api/scan_opportunities`);
-      const data = await res.json();
-      renderScanResults(data.items || [], data.cached);
+      const [scanRes, wlRes] = await Promise.all([
+        fetch(`${API}/api/scan_opportunities`),
+        fetch(`${API}/api/watchlist`)
+      ]);
+      const data = await scanRes.json();
+      const watchlist = await wlRes.json();
+      const wlSet = new Set((watchlist || []).map(w => (w.variety || '').trim().toUpperCase()));
+      window._cachedScanItems = data.items || [];
+      window._cachedScanCached = data.cached;
+      window._cachedScanWLSet = wlSet;
+      renderScanResults(data.items || [], data.cached, wlSet);
     } catch(e) {
       document.getElementById('scanModalBody').innerHTML = `<div style="text-align:center;padding:30px;color:var(--red)">扫描失败: ${e.message}</div>`;
     }
@@ -3102,30 +3110,85 @@
     if (modal) modal.style.display = 'none';
   }
 
-  function renderScanResults(items, cached) {
+  // ── 扫市场排序/筛选状态 ───────────────────────────────────
+  let _scanSort = 'near_entry';
+  let _scanFilter = 'all';
+
+  function doScanSort(val) {
+    _scanSort = val;
+    const items = window._cachedScanItems;
+    if (items) renderScanResults(items, window._cachedScanCached, window._cachedScanWLSet);
+  }
+
+  function doScanFilter(val) {
+    _scanFilter = val;
+    const items = window._cachedScanItems;
+    if (items) renderScanResults(items, window._cachedScanCached, window._cachedScanWLSet);
+  }
+
+  function applyScanSortFilter(items) {
+    let filtered = items;
+    if (_scanFilter === 'long') {
+      filtered = filtered.filter(item => (item.reasons || []).some(r => r.type === 'near_entry' && r.side === 'long'));
+    } else if (_scanFilter === 'short') {
+      filtered = filtered.filter(item => (item.reasons || []).some(r => r.type === 'near_entry' && r.side === 'short'));
+    } else if (_scanFilter === 'near') {
+      filtered = filtered.filter(item => (item.reasons || []).some(r => r.type === 'near_entry'));
+    } else if (_scanFilter === 'div') {
+      filtered = filtered.filter(item => (item.reasons || []).some(r => r.type === 'div_kdj'));
+    } else if (_scanFilter === 'rr') {
+      filtered = filtered.filter(item => (item.reasons || []).some(r => r.type === 'double_rr'));
+    }
+    filtered.sort((a, b) => {
+      if (_scanSort === 'near_entry') {
+        const aNear = Math.min(...(a.reasons || []).filter(r => r.type === 'near_entry').map(r => r.dev_pct || 999));
+        const bNear = Math.min(...(b.reasons || []).filter(r => r.type === 'near_entry').map(r => r.dev_pct || 999));
+        return aNear - bNear;
+      } else if (_scanSort === 'rr') {
+        const aRR = Math.max(...(a.reasons || []).filter(r => r.type === 'double_rr').flatMap(r => [r.rr_long, r.rr_short]).filter(v => v != null));
+        const bRR = Math.max(...(b.reasons || []).filter(r => r.type === 'double_rr').flatMap(r => [r.rr_long, r.rr_short]).filter(v => v != null));
+        return bRR - aRR;
+      } else if (_scanSort === 'alpha') {
+        return a.variety.localeCompare(b.variety);
+      } else if (_scanSort === 'div_strength') {
+        const aDiv = Math.max(...(a.reasons || []).filter(r => r.type === 'div_kdj').map(r => r.div_strength || 0));
+        const bDiv = Math.max(...(b.reasons || []).filter(r => r.type === 'div_kdj').map(r => r.div_strength || 0));
+        return bDiv - aDiv;
+      }
+      return 0;
+    });
+    return filtered;
+  }
+
+  function renderScanResults(items, cached, wlSet) {
+    wlSet = wlSet || new Set();
     const body = document.getElementById('scanModalBody');
-    if (!items.length) {
-      body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">\ud83d\udd0d 暂无符合条件的入场机会</div>';
+    const filtered = applyScanSortFilter(items);
+    if (!filtered.length) {
+      body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">🔍 暂无符合条件的入场机会</div>';
       return;
     }
-    const html = items.map(item => {
+    const html = filtered.map(item => {
       const reasons = (item.reasons || []).map(r => {
         if (r.type === 'near_entry') {
           const color = r.side === 'long' ? 'var(--red)' : 'var(--green)';
           const bg = r.side === 'long' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)';
-          const icon = r.side === 'long' ? '\ud83d\ude80' : '\ud83c\udfaf';
+          const icon = r.side === 'long' ? '🚀' : '🌀';
           const dir = r.side === 'long' ? '做多' : '做空';
           return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:${bg};color:${color};border:1px solid ${color}20">${icon} ${dir}入场 ${r.dev_pct}%</span>`;
         }
         if (r.type === 'div_kdj') {
-          return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(168,85,247,0.12);color:#a855f7;border:1px solid rgba(168,85,247,0.25)">\ud83d\udca8 ${r.text}</span>`;
+          return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(168,85,247,0.12);color:#a855f7;border:1px solid rgba(168,85,247,0.25)">💊 ${r.text}</span>`;
         }
         if (r.type === 'double_rr') {
-          return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(59,130,246,0.1);color:var(--blue);border:1px solid rgba(59,130,246,0.2)">\ud83d\udcc8 双R/R>2</span>`;
+          return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(59,130,246,0.1);color:var(--blue);border:1px solid rgba(59,130,246,0.2)">📊 双R/R>2</span>`;
         }
         return '';
       }).join(' ');
-
+      const inWL = wlSet.has((item.variety || '').trim().toUpperCase());
+      const btnHtml = inWL
+        ? `<button disabled style="padding:7px 14px;border-radius:10px;border:1px solid rgba(34,197,94,0.3);background:rgba(34,197,94,0.08);color:rgba(34,197,94,0.6);font-size:0.8rem;font-weight:600;cursor:not-allowed;white-space:nowrap;font-family:inherit">✓ 已在自选</button>`
+        : `<button onclick="addToWatchlistFromScan('${item.variety}', this)" style="padding:7px 14px;border-radius:10px;border:none;background:rgba(168,85,247,0.15);color:#a855f7;font-size:0.8rem;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.2s" onmouseover="this.style.background='rgba(168,85,247,0.25)'" onmouseout="this.style.background='rgba(168,85,247,0.15)'">+ 自选</button>`;
       return `
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:12px;transition:border-color 0.2s" onmouseover="this.style.borderColor='var(--border-bright)'" onmouseout="this.style.borderColor='var(--border)'">
           <div style="flex:1;min-width:0">
@@ -3142,10 +3205,9 @@
               ${item.atr ? ` · ATR=${item.atr}` : ''}
             </div>
           </div>
-          <button onclick="addToWatchlistFromScan('${item.variety}', this)" style="padding:7px 14px;border-radius:10px;border:none;background:rgba(168,85,247,0.15);color:#a855f7;font-size:0.8rem;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.2s") onmouseover="this.style.background='rgba(168,85,247,0.25)'" onmouseout="this.style.background='rgba(168,85,247,0.15)'">+ 自选</button>
+          ${btnHtml}
         </div>`;
     }).join('');
-
     body.innerHTML = `<div style="max-height:70vh;overflow-y:auto;padding:4px">${html}</div>`;
   }
 
@@ -3158,7 +3220,7 @@
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({variety: variety})
       });
-      btn.textContent = '\u2705 已添加';
+      btn.textContent = '✓ 已添加';
       btn.style.background = 'rgba(34,197,94,0.15)';
       btn.style.color = 'var(--green)';
     } catch(e) {
@@ -3168,14 +3230,31 @@
   }
 
 </script>
-
 <!-- 扫市场弹窗 -->
 <div id="scanModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this)closeScanModal()">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;width:100%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.4)">
-    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-      <div>
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
         <div style="font-size:1rem;font-weight:700;color:var(--text)">\ud83d\udd0d 市场机会扫描</div>
         <div style="font-size:0.72rem;color:var(--text-dim);margin-top:2px">满足任一条件：接近入场价 · MACD背离+KDJ共振 · 双边R/R>2</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div style="font-size:0.7rem;color:var(--text-dim);white-space:nowrap">排序:</div>
+        <select onchange="doScanSort(this.value)" style="background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:0.75rem;font-family:inherit;cursor:pointer">
+          <option value="near_entry">最接近入场</option>
+          <option value="rr">R/R最高</option>
+          <option value="alpha">品种字母序</option>
+          <option value="div_strength">背离强度</option>
+        </select>
+        <div style="font-size:0.7rem;color:var(--text-dim);white-space:nowrap">筛选:</div>
+        <select onchange="doScanFilter(this.value)" style="background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:0.75rem;font-family:inherit;cursor:pointer">
+          <option value="all">全部</option>
+          <option value="long">仅做多</option>
+          <option value="short">仅做空</option>
+          <option value="near">仅近入场</option>
+          <option value="div">仅背离</option>
+          <option value="rr">仅双R/R</option>
+        </select>
       </div>
       <button onclick="closeScanModal()" style="background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer;padding:4px 8px;border-radius:6px;line-height:1">\u2715</button>
     </div>
