@@ -985,6 +985,24 @@
         padding: 14px 8px !important;
         min-width: unset !important;
       }
+      /* watchlist 横向：entryBadge 改为行内横向紧凑标签 */
+      .watchlist-grid .entry-badge-wrap {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        gap: 4px !important;
+        margin-top: 0 !important;
+        background: transparent !important;
+        padding: 0 !important;
+        border-radius: 0 !important;
+        font-size: 0.7rem !important;
+      }
+      .watchlist-grid .entry-badge-wrap span {
+        padding: 2px 6px !important;
+        white-space: nowrap;
+      }
+      /* watchlist 隐藏入场文字详情（保留徽章即可） */
+      .watchlist-grid .entry-detail-row { display: none !important; }
       .watchlist-grid .position-header { margin-bottom: 0; flex: 1; }
       .watchlist-grid .position-pnl { font-size: 14px !important; }
       .watchlist-grid .position-details { margin-bottom: 0; }
@@ -2139,11 +2157,10 @@
       q.rr_ratio = dir === 'short' ? rrShort : rrLong;
       // ── 入场机会判断 ──────────────────────────────────
       const el = q.entry_prompt_long, es = q.entry_prompt_short;
-      const cp = q.current_price;
       const longSignal = (cp && el && cp <= el) ? { triggered: true, dist: ((cp - el) / el * 100) } : (cp && el ? { triggered: false, dist: ((cp - el) / el * 100) } : null);
       const shortSignal = (cp && es && cp >= es) ? { triggered: true, dist: ((es - cp) / es * 100) } : (cp && es ? { triggered: false, dist: ((es - cp) / es * 100) } : null);
       const entryBadge = (longSignal || shortSignal) ? `
-        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+        <div class="entry-badge-wrap" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
           ${longSignal ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;${longSignal.triggered ? 'background:rgba(239,68,68,0.18);color:var(--red);border:1px solid rgba(239,68,68,0.3);animation:pulse-red 1.5s infinite' : 'background:rgba(239,68,68,0.08);color:var(--text-dim);border:1px solid rgba(239,68,68,0.15)'}">
             🚀 做多 ${longSignal.triggered ? '入场!' : '机会'}
             <span style="opacity:0.8">${el}</span>
@@ -2186,7 +2203,7 @@
           </div>
           ${entryBadge}
           ${(entryLong || entryShort) ? `
-          <div style="margin-top:6px;padding:6px 8px;background:var(--surface-2);border-radius:8px;font-size:0.78rem;display:flex;flex-direction:column;gap:3px">
+          <div class="entry-detail-row" style="margin-top:6px;padding:6px 8px;background:var(--surface-2);border-radius:8px;font-size:0.78rem;display:flex;flex-direction:column;gap:3px">
             ${entryLong ? `<span style="color:var(--red)">做多入 ${entryLong}</span>` : ''}
             ${entryShort ? `<span style="color:var(--green)">做空入 ${entryShort}</span>` : ''}
           </div>` : ''}
