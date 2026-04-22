@@ -1,4 +1,4 @@
-<!-- 版本: v0.2.3（2026-04-20）修复: 保证金预警阈值逻辑反转Bug -->
+<!-- 版本: v0.3.1（2026-04-23）修复: 自选删除按钮·指标null时R/R/入场提示隐藏·SSE刷新保护 -->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -2142,8 +2142,10 @@
         : '—';
       const supportText = q.support ? `撑 ${q.support}` : '—';
       const resistText = q.resistance ? `阻 ${q.resistance}` : '—';
-      const entryLong = q.entry_prompt_long ? `做多入 ${q.entry_prompt_long}` : null;
-      const entryShort = q.entry_prompt_short ? `做空入 ${q.entry_prompt_short}` : null;
+      // v0.3.1: indicatorsAvailable 保护 — support/resistance 为 null 时不显示误导性 R/R 和入场提示
+      const indicatorsAvailable = !q.error && q.support != null && q.resistance != null;
+      const entryLong = indicatorsAvailable && q.entry_prompt_long ? `做多入 ${q.entry_prompt_long}` : null;
+      const entryShort = indicatorsAvailable && q.entry_prompt_short ? `做空入 ${q.entry_prompt_short}` : null;
       // R/R ratio — 前端展示用 rr_ratio（方向跟随 current_direction 或固定多头）
       const cp = q.current_price, sup = q.support, res = q.resistance;
       const rrLong = (cp && sup && res && cp > sup) ? parseFloat(((res - cp) / (cp - sup)).toFixed(2)) : null;
@@ -2155,7 +2157,8 @@
       const el = q.entry_prompt_long, es = q.entry_prompt_short;
       const longSignal = (cp && el && cp <= el) ? { triggered: true, dist: ((cp - el) / el * 100) } : (cp && el ? { triggered: false, dist: ((cp - el) / el * 100) } : null);
       const shortSignal = (cp && es && cp >= es) ? { triggered: true, dist: ((es - cp) / es * 100) } : (cp && es ? { triggered: false, dist: ((es - cp) / es * 100) } : null);
-      const entryBadge = (longSignal || shortSignal) ? `
+      // v0.3.1: 只在指标有效时才计算入场信号
+      const entryBadge = indicatorsAvailable && (longSignal || shortSignal) ? `
         <div class="entry-badge-wrap" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
           ${longSignal ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;${longSignal.triggered ? 'background:rgba(239,68,68,0.18);color:var(--red);border:1px solid rgba(239,68,68,0.3);animation:pulse-red 1.5s infinite' : 'background:rgba(239,68,68,0.08);color:var(--text-dim);border:1px solid rgba(239,68,68,0.15)'}">
             🚀 做多 ${longSignal.triggered ? '入场!' : '机会'}
@@ -2173,6 +2176,7 @@
           <div class="position-header">
             <div class="position-title">
               ${q.variety} <span style="font-size:14px;color:var(--text-dim)">${q.name || ''}</span>
+              <button onclick="removeFromWatchlist('${q.variety}')" title="移除自选" style="margin-left:6px;background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:15px;line-height:1;padding:2px 4px;border-radius:4px;transition:color 0.15s" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text-dim)'">✕</button>
             </div>
             <div class="position-pnl ${chgClass}">
               ${chgSign}${chg}%
@@ -2190,6 +2194,7 @@
               <span style="color:var(--green)">做空 ${ssLabel} ${scoreShort || '—'}</span>
             </div>
           </div>
+          ${indicatorsAvailable ? `
           <div class="position-info-row">
             <span>R/R多 ${rrStars(rrLong)}</span>
             <span>${supportText}</span>
@@ -2220,6 +2225,34 @@
             </div>
           </div>` : ''}
 
+          ${(q.position_sizing) ? `
+          <div style="margin-top:6px;padding:5px 8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);border-radius:8px;font-size:0.75rem">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:var(--blue);font-weight:600">📐 仓位</span>
+              <span>建议 <b>${q.position_sizing.recommended_size}手</b> / 最大 <b>${q.position_sizing.max_size}手</b></span>
+            </div>
+            <div style="color:var(--text-dim);margin-top:2px">ATR ${q.position_sizing.atr || '-'} · 单笔风险 ¥${(q.position_sizing.risk_amount||0).toLocaleString()}</div>
+          </div>` : ''}
+          ` : `
+          <div style="margin-top:6px;padding:6px 10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:8px;font-size:0.78rem;color:#d97706">
+            📊 指标暂不可用，仅显示基础行情
+          </div>`}
+          ${(q.resonance) ? `
+          <div style="margin-top:6px;padding:5px 8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);border-radius:8px;font-size:0.75rem">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:#a855f7;font-weight:600">🔊 共振</span>
+              <span style="font-weight:600;${q.resonance.resonance_direction===1?'color:var(--green)':(q.resonance.resonance_direction===-1?'color:var(--red)':'color:var(--text-dim)')}">${q.resonance.recommendation || ''} ${q.resonance.resonance_score || ''}</span>
+            </div>
+            <div style="display:flex;gap:5px;margin-top:2px">
+              ${['日线','60分钟','15分钟'].map(tf => {
+                const p = q.resonance.periods ? q.resonance.periods[tf] : null;
+                if (!p) return '';
+                const dirColor = p.direction===1?'var(--green)':(p.direction===-1?'var(--red)':'var(--text-dim)');
+                const dirLabel = p.direction===1?'↑':(p.direction===-1?'↓':'—');
+                return `<span style="color:${dirColor}">${tf} ${dirLabel}</span>`;
+              }).join('')}
+            </div>
+          </div>` : ''}
           ${(q.position_sizing) ? `
           <div style="margin-top:6px;padding:5px 8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);border-radius:8px;font-size:0.75rem">
             <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2276,19 +2309,22 @@
         const scoreLong = q.score_long != null ? Math.round(q.score_long) : 0;
         const bar = card.querySelector('.position-score-bar');
         if (bar) bar.style.width = `${scoreLong}%`;
-        // 更新 R/R 和支撑/阻力文字
-        const rrLong = q.rr_ratio || null;
-        const supportText = q.support ? `撑 ${q.support}` : '—';
-        const resistText = q.resistance ? `阻 ${q.resistance}` : '—';
+        // 更新 R/R 和支撑/阻力文字（v0.3.1: 当指标不可用时跳过 R/R 更新，防止误导）
         const infoRow = card.querySelector('.position-info-row');
-        if (infoRow) {
+        if (infoRow && !q.error && q.support != null && q.resistance != null) {
           const rrLongVal = (q.current_price && q.support && q.resistance && q.current_price > q.support)
             ? parseFloat(((q.resistance - q.current_price) / (q.current_price - q.support)).toFixed(2)) : null;
+          const rrShortVal = (q.current_price && q.support && q.resistance && q.current_price < q.resistance)
+            ? parseFloat(((q.current_price - q.support) / (q.resistance - q.current_price)).toFixed(2)) : null;
           infoRow.innerHTML = `
             <span>R/R多 ${rrStars(rrLongVal)}</span>
-            <span>${supportText}</span>
-            <span>${resistText}</span>
+            <span>撑 ${q.support}</span>
+            <span>阻 ${q.resistance}</span>
+            <span>R/R空 ${rrStars(rrShortVal)}</span>
           `;
+        } else if (infoRow) {
+          // 指标不可用时显示提示，不更新 R/R 行
+          infoRow.innerHTML = `<span style="color:#d97706;font-size:0.75rem">📊 指标暂不可用</span>`;
         }
       } catch(e) { console.error('wl refresh error', e); }
     }, 500);
