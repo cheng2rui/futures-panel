@@ -1,6 +1,9 @@
-# 版本: v0.2.3（2026-04-20）
-# 修复: (1) VaR计算abs()修正direction问题 (2) 保证金预警阈值逻辑反转Bug
-#       (3) VaR冗余if/else删除 (4) 评分波动率/成交量加方向修正 (5) VaR ret_std改ddof=0
+# 版本: v0.2.11（2026-04-22）
+# 修复: (1) SSE连接从list改为dict，O(1)删除，死连接主动摘除
+#       (2) _broadcast_event 持锁优化，锁外逐个投递，慢客户端不阻塞
+#       (3) SSE有界队列maxsize=50，队列满主动摘除慢客户端
+#       (4) 预警防重放加锁线程安全（_alert_rate_lock）
+#       (5) 自选广播：文件变更检测+ThreadPoolExecutor并发抓取
 # ─────────────────────────────────────────────
 import json
 import os
@@ -18,7 +21,7 @@ import pandas as pd
 import numpy as np
 
 # 文件读写锁（防止并发写入竞争）
-_positions_lock = threading.RLock()  # 重入锁，允许嵌套调用
+_positions_lock = threading.Lock()
 _watchlist_lock = threading.Lock()
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
@@ -335,32 +338,6 @@ def _fetch_price_from_sina(variety: str) -> tuple | None:
     # 策略2：直接解析 Sina hq 接口（akshare 失败时的备用）
     return _fetch_price_from_sina_direct(variety, prefix, suffix, meta)
 
-def _fetch_preclose_from_sina(variety: str) -> float | None:
-    """从 Sina hq 接口抓取前一交易日收盘价（parts[2]）"""
-    try:
-        prefix = "".join(filter(str.isalpha, variety))
-        suffix = "".join(filter(str.isdigit, variety))
-        key = _resolve_variety_key(prefix)
-        meta = VARIETY_META_LOWER.get(key) if key else None
-        if not meta:
-            return None
-        direct_sym = f"nf_{prefix.upper()}{suffix}"
-        import requests
-        r = requests.get(
-            f"https://hq.sinajs.cn/list={direct_sym}",
-            headers={"Referer": "https://finance.sina.com.cn",
-                     "User-Agent": "Mozilla/5.0"},
-            timeout=5
-        )
-        r.encoding = "gb2312"
-        val = r.text.split('=')[1].strip('";\n ')
-        parts = val.split(',')
-        if len(parts) > 2:
-            return float(parts[2])
-        return None
-    except:
-        return None
-
 def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) -> tuple | None:
     """备用：直接请求 Sina hq.sinajs.cn，绕过 akshare 的 demjson 解析器"""
     try:
@@ -383,12 +360,6 @@ def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) 
         if len(parts) < 4:
             return None
         price = float(parts[3])
-        preclose = float(parts[2]) if len(parts) > 2 else 0
-        # field[3] 与前结算几乎相等时（如 PX 合约），说明 field[3] 是昨日结算；用 field[6] 当今日现价
-        if preclose > 0 and abs(price - preclose) < 50 and len(parts) > 6:
-            alt = float(parts[6])
-            if alt > 0 and abs(alt - preclose) > 50:
-                price = alt
         return (price, meta[2], meta[0])
     except Exception as e:
         # print(f"Sina direct fallback 失败 {variety}: {e}")  # 太吵，注释掉
@@ -462,41 +433,66 @@ def _stale_cleaner():
 _cleaner_thread = threading.Thread(target=_stale_cleaner, daemon=True)
 _cleaner_thread.start()
 
-# ── 自选合约实时行情广播（每5秒）──
+# ── 自选合约实时行情广播（v0.2.4：内存缓存+变更检测，并发抓取）──
+_watchlist_cache = {}
+_watchlist_cache_lock = threading.Lock()
+_last_watchlist_mtime = 0.0
+
 def _watchlist_broadcaster():
-    """每5秒强制抓取自选合约价格并推送到所有SSE客户端"""
+    """每5秒强制抓取自选合约价格并推送到所有SSE客户端；带缓存和并发加速"""
+    global _last_watchlist_mtime
     while True:
         time.sleep(5)
         try:
-            wl = load_watchlist()
-            for item in wl:
-                v = item if isinstance(item, str) else item.get('variety', '')
-                if not v:
-                    continue
-                # 强制走网络抓取，直接广播给所有SSE客户端（带完整字段供前端badge判断）
-                result = _fetch_price_from_sina(v)
-                if result:
-                    price, unit, name = result
-                    # change_pct：从前一天结算价计算
-                    preclose = _fetch_preclose_from_sina(v)
-                    change_pct = round((price - preclose) / preclose * 100, 2) if preclose and preclose != 0 else 0
-                    # entry_prompt：从支撑/阻力推算（需先算支撑阻力）
-                    sr = calc_sr_multi_period(v)
-                    support, resistance = sr[0], sr[1]
-                    atr = sr[5] or 0
-                    entry_prompt_long = round(support + 0.3 * atr, 2) if support else None
-                    entry_prompt_short = round(resistance - 0.3 * atr, 2) if resistance else None
-                    payload = {
-                        'variety': v,
-                        'price': price,
-                        'is_watchlist': True,
-                        'name': name,
-                        'change_pct': change_pct,
-                        'entry_prompt_long': entry_prompt_long,
-                        'entry_prompt_short': entry_prompt_short,
-                        'current_price': price,
-                    }
-                    _broadcast_event('price_update', payload)
+            # 检测文件是否变更（避免每次全量读文件）
+            if os.path.exists(WATCHLIST_FILE):
+                mtime = os.path.getmtime(WATCHLIST_FILE)
+                if mtime != _last_watchlist_mtime:
+                    _last_watchlist_mtime = mtime
+                    wl = load_watchlist()
+                    with _watchlist_cache_lock:
+                        _watchlist_cache.clear()
+                    for item in wl:
+                        v = item if isinstance(item, str) else item.get('variety', '')
+                        if v:
+                            with _watchlist_cache_lock:
+                                _watchlist_cache[v] = None  # 标记待刷新
+            else:
+                continue
+
+            # 并发抓取所有自选行情（线程池）
+            items_to_fetch = []
+            with _watchlist_cache_lock:
+                for v in list(_watchlist_cache.keys()):
+                    items_to_fetch.append(v)
+
+            if not items_to_fetch:
+                continue
+
+            # 批量并发 fetch（最多10个线程）
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(_fetch_price_from_sina, v): v for v in items_to_fetch}
+                for fut in as_completed(futures, timeout=12):
+                    v = futures[fut]
+                    try:
+                        result = fut.result(timeout=12)
+                        if result is not None:
+                            price, unit, name = result
+                            with _watchlist_cache_lock:
+                                _watchlist_cache[v] = (price, name)
+                            _broadcast_event('price_update', {
+                                'variety': v,
+                                'price': price,
+                                'is_watchlist': True,
+                                'name': name,
+                            })
+                        else:
+                            with _watchlist_cache_lock:
+                                _watchlist_cache[v] = None
+                    except Exception:
+                        with _watchlist_cache_lock:
+                            _watchlist_cache[v] = None
         except Exception as e:
             print(f"[_watchlist_broadcaster] 异常: {e}")
 
@@ -515,7 +511,7 @@ def internal_error(error):
     return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
 
 # 实时行情缓存（已统一60秒TTL，akshare慢，减少穿透）
-INACTIVE_CONTRACTS = {'PS', 'TL', 'BR', 'PX'}  # PX: akshare不支持，fallback走Sina nf_px可取到
+INACTIVE_CONTRACTS = {'PS', 'TL', 'BR'}
 _market_cache = CircuitBreakerCache(ttl_price=60, ttl_market=60, ttl_kline=300)
 
 # ── 账户资金配置 ─────────────────────────────────────────
@@ -561,20 +557,18 @@ def _send_webhook(url, alerts):
     except Exception as e:
         print(f"Webhook 推送失败: {e}")
 
-# ── SSE 推送（P0-2：改进版 — 连接状态追踪）──
+# ── SSE 推送（v0.2.4：dict 管理连接，O(1) 删除，队列满主动摘除）──
 _SSE_MSG_QUEUE = queue.Queue()
-_SSE_CLIENTS = []           # [(queue, metadata_dict), ...]
+_SSE_CLIENTS = {}           # {client_id: {"queue": Queue, "meta": {...}}} — dict 便于 O(1) 删除
 _SSE_LOCK = threading.Lock()
 _SSE_CLIENT_ID = 0
-_SSE_CONNECTIONS = {}       # client_id → {"connected_at": float, "last_msg": float, "alive": bool}
 
 # SSE 全局连接状态（供前端查询）
 _sse_global_lock = threading.Lock()
-_sse_connection_count = 0
 _sse_last_heartbeat = time.time()
 
 def _broadcast_event(event_type, data):
-    """线程安全地将事件放入队列"""
+    """线程安全地将事件放入队列；持锁只做快照，锁外逐个投递，避免慢客户端阻塞全局锁"""
     payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
     try:
         _SSE_MSG_QUEUE.put_nowait(payload)
@@ -583,32 +577,35 @@ def _broadcast_event(event_type, data):
     with _sse_global_lock:
         global _sse_last_heartbeat
         _sse_last_heartbeat = time.time()
+    # 广播线程独立从队列消费，不在此持锁
 
 def _sse_broadcast_safe():
-    """每秒检查队列并将消息发送给所有 SSE 客户端"""
+    """每秒检查队列并将消息发送给所有 SSE 客户端；队列满时主动摘除慢客户端"""
     while True:
         time.sleep(1)
         try:
             while True:
                 msg = _SSE_MSG_QUEUE.get_nowait()
-                dead = []
+                dead_ids = []
+                # 快照客户端列表，持锁时间尽量短
                 with _SSE_LOCK:
-                    for client_id, client in _SSE_CLIENTS:
-                        try:
-                            client['queue'].put_nowait(msg)
-                            client['last_msg'] = time.time()
-                        except Exception:
-                            dead.append(client_id)
-                    # 清理死连接（从后往前pop，避免索引偏移）
-                    for cid in dead:
-                        for i in range(len(_SSE_CLIENTS) - 1, -1, -1):
-                            c_id, c = _SSE_CLIENTS[i]
-                            if c_id == cid:
-                                c['alive'] = False
-                                _SSE_CLIENTS.pop(i)
-                                if cid in _SSE_CONNECTIONS:
-                                    del _SSE_CONNECTIONS[cid]
-                                break
+                    client_items = list(_SSE_CLIENTS.items())
+                for client_id, client in client_items:
+                    try:
+                        client["queue"].put_nowait(msg, timeout=1)
+                        client["meta"]["last_msg"] = time.time()
+                    except queue.Full:
+                        # 队列积压超限，主动标记为dead（不再投递）
+                        dead_ids.append(client_id)
+                    except Exception:
+                        dead_ids.append(client_id)
+                # 批量清理死连接（持锁一次）
+                if dead_ids:
+                    with _SSE_LOCK:
+                        for cid in dead_ids:
+                            if cid in _SSE_CLIENTS:
+                                client = _SSE_CLIENTS.pop(cid)
+                                client["meta"]["alive"] = False
         except queue.Empty:
             pass
 
@@ -1450,25 +1447,26 @@ def index():
     return render_template('index.html')
 
 
-# ── SSE 实时推送（P0-2 改进） ──────────────────────────
+# ── SSE 实时推送（v0.2.4：dict 连接管理，心跳保活，断连自动清理）──
 @app.route('/api/stream')
 def sse_stream():
     from flask import Response
     _ensure_broadcaster()
 
     global _SSE_CLIENT_ID
+    client_queue = queue.Queue(maxsize=50)   # 有界队列，积压超限视为慢客户端
+    client_meta = {
+        "connected_at": time.time(),
+        "last_msg": time.time(),
+        "alive": True
+    }
     with _SSE_LOCK:
         _SSE_CLIENT_ID += 1
         client_id = _SSE_CLIENT_ID
-        client_queue = queue.Queue()
-        client_meta = {"queue": client_queue, "connected_at": time.time(),
-                       "last_msg": time.time(), "alive": True}
-        _SSE_CLIENTS.append((client_id, client_meta))
-        _SSE_CONNECTIONS[client_id] = client_meta
+        _SSE_CLIENTS[client_id] = {"queue": client_queue, "meta": client_meta}
 
     with _sse_global_lock:
-        global _sse_connection_count, _sse_last_heartbeat
-        _sse_connection_count += 1
+        global _sse_last_heartbeat
         _sse_last_heartbeat = time.time()
 
     def enqueue(msg):
@@ -1483,23 +1481,20 @@ def sse_stream():
                 msg = client_queue.get(timeout=55)
                 yield msg
             except queue.Empty:
-                # 发心跳保活
+                # 55秒无消息，发心跳保活（代理/Nginx 超时保活）
                 yield f"event: heartbeat\ndata: {json.dumps({'ts': time.time()})}\n\n"
     except GeneratorExit:
         pass  # 客户端主动断开，正常
     except Exception as e:
         print(f"SSE stream error: {e}")
     finally:
+        # O(1) 删除，不再遍历列表
         with _SSE_LOCK:
-            for i, (c_id, c) in enumerate(_SSE_CLIENTS):
-                if c_id == client_id:
-                    c['alive'] = False
-                    _SSE_CLIENTS.pop(i)
-                    break
+            if client_id in _SSE_CLIENTS:
+                _SSE_CLIENTS[client_id]["meta"]["alive"] = False
+                _SSE_CLIENTS.pop(client_id, None)
         with _sse_global_lock:
-            _sse_connection_count = max(0, _sse_connection_count - 1)
-        if client_id in _SSE_CONNECTIONS:
-            del _SSE_CONNECTIONS[client_id]
+            _sse_last_heartbeat = time.time()
 
 @app.after_request
 def _ensure_sse_content_type(response):
@@ -1509,22 +1504,21 @@ def _ensure_sse_content_type(response):
         response.headers['X-Accel-Buffering'] = 'no'
     return response
 
-# SSE 连接状态查询（P0-3 前端状态灯）
 @app.route('/api/sse_status', methods=['GET'])
 def sse_status():
     with _sse_global_lock:
-        count = _sse_connection_count
         last_hb = _sse_last_heartbeat
+    with _SSE_LOCK:
+        alive_count = sum(1 for c in _SSE_CLIENTS.values() if c["meta"]["alive"])
     now = time.time()
-    # 判断连接状态：最后心跳 > 20s → 断开
-    if count == 0:
+    if alive_count == 0:
         status = "disconnected"
     elif now - last_hb > 20:
         status = "stale"
     else:
         status = "connected"
     return jsonify({
-        "connections": count,
+        "connections": alive_count,
         "last_heartbeat": last_hb,
         "status": status,
         "server_time": now
@@ -1570,15 +1564,17 @@ def handle_alerts():
     _save_account(acct)
     return jsonify({"message": "预警配置已保存", "alerts": acct['alerts']})
 
-_alert_rate_limit = {'last_time': 0.0}  # check_alerts 防重放
+_alert_rate_limit = {'last_time': 0.0}  # check_alerts 防重放（有锁）
+_alert_rate_lock = threading.Lock()
 
 @app.route('/api/alerts/check', methods=['GET'])
 def check_alerts():
-    # Rate limit: 5秒内只处理一次，防止重复预警
+    # Rate limit: 5秒内只处理一次，防止重复预警（线程安全）
     now = time.time()
-    if now - _alert_rate_limit['last_time'] < 5:
-        return jsonify({"alerts": [], "has_alerts": False, "_rate_limited": True})
-    _alert_rate_limit['last_time'] = now
+    with _alert_rate_lock:
+        if now - _alert_rate_limit['last_time'] < 5:
+            return jsonify({"alerts": [], "has_alerts": False, "_rate_limited": True})
+        _alert_rate_limit['last_time'] = now
     positions = load_positions()
     if not positions:
         return jsonify({"alerts": [], "has_alerts": False})
@@ -1899,125 +1895,6 @@ def api_position_sizing():
     sizing['variety'] = variety.upper() if variety else None
     sizing['equity'] = equity
     return jsonify(sizing)
-
-# ── 扫描机会 ─────────────────────────────────────────────
-# 成交稀少的品种，排除在扫描之外
-ILLIQUID_KEYS = {
-    # INE 能源（成交稀少/人民币挂钩波动小）
-    'ec', 'lu',
-    # DCE 成交稀少
-    'fb', 'bb', 'lg',
-    # CZCE 成交稀少/仅长期合约
-    'pm', 'ri', 'lr', 'jr', 'rs', 'wh', 'zc',
-    # SHFE 成交稀少/不活跃
-    'wr', 'fu', 'ad', 'op',
-    # GFEX 成交稀少
-    'pd', 'pt',
-    # CZCE akshare不支持实时行情
-    'ma', 'pg',
-}
-
-@app.route('/api/scan/opportunities', methods=['GET'])
-def api_scan_opportunities():
-    """
-    扫描所有活跃品种，寻找符合入场条件的合约：
-    - 做多机会：现价 < entry_prompt_long（支撑 + 0.3*ATR）
-    - 做空机会：现价 > entry_prompt_short（阻力 - 0.3*ATR）
-    排除 ILLIQUID_KEYS 中的品种，以及成交持仓为0的合约。
-    返回按机会强度（R/R比）排序的列表。
-    """
-    import akshare as ak
-    opportunities = []
-    failed = []
-    _seen_contracts = set()  # 去重：防止同一合约被多个品种映射（如L和PP都映射到"塑料"）
-
-    # 遍历所有品种（排除不活跃的）
-    for key, meta in VARIETY_META.items():
-        key_l = key.lower()
-        if key_l in ILLIQUID_KEYS:
-            continue
-        # 品种中文名
-        name_cn = meta[0]
-        sina_sym = meta[1]  # Sina 接口品种名
-
-        try:
-            # 获取该品种所有活跃合约，取成交量最大者
-            df = ak.futures_zh_realtime(symbol=sina_sym)
-            if df is None or df.empty:
-                failed.append((key, name_cn, '无数据'))
-                continue
-            # 过滤：排除"连续"合约（符号以单个0结尾，如RB0/L0/V0），取持仓量最大的具体月合约
-            df2 = df[
-                df['position'].apply(lambda x: float(x) if x is not None else 0) > 0
-            ].copy()
-            df2['_sym'] = df2['symbol'].astype(str)
-            # 排除连续合约：符号以单个0结尾（非日期数字，如RB0/L0，不含2610/2607）
-            df2 = df2[df2['_sym'].apply(lambda s: not (s[-1] == '0' and not s[-2:].isdigit()))]
-            if df2.empty:
-                failed.append((key, name_cn, '无持仓(仅连续合约)'))
-                continue
-            best = df2.sort_values('position', ascending=False).iloc[0]
-            contract = str(best['symbol'])          # 如 'RB2610'（非RB0）
-            cur_price = float(best['trade'])
-            vol = int(best.get('volume', 0) or 0)
-            pos = int(best.get('position', 0) or 0)
-
-            # 同一合约可能被多个品种映射（如L/PP都查询"塑料"），去重
-            if contract in _seen_contracts:
-                continue
-            _seen_contracts.add(contract)
-
-            # 计算支撑阻力
-            sr = calc_sr_multi_period(contract)
-            support, resistance = sr[0], sr[1]
-            atr_val = sr[5]
-            if support is None or resistance is None or atr_val is None or atr_val <= 0:
-                failed.append((key, name_cn, '指标缺失'))
-                continue
-
-            entry_long = round(support + 0.3 * atr_val, 2)
-            entry_short = round(resistance - 0.3 * atr_val, 2)
-
-            # 判断机会类型
-            opp_type = None
-            if cur_price < entry_long:
-                opp_type = '做多机会'
-                rr_ratio = round((resistance - cur_price) / (cur_price - (support - 0.5 * atr_val)), 2) if cur_price != (support - 0.5 * atr_val) else None
-                entry_rr = round((resistance - cur_price) / (cur_price - entry_long), 2) if cur_price != entry_long else None
-            elif cur_price > entry_short:
-                opp_type = '做空机会'
-                rr_ratio = round((cur_price - support) / ((resistance + 0.5 * atr_val) - cur_price), 2) if (resistance + 0.5 * atr_val) != cur_price else None
-                entry_rr = round((cur_price - support) / (entry_short - cur_price), 2) if entry_short != cur_price else None
-
-            if opp_type is None:
-                continue  # 无机会
-
-            opportunities.append({
-                'variety': contract,
-                'name': name_cn,
-                'exchange': meta[2],
-                'current_price': cur_price,
-                'support': support,
-                'resistance': resistance,
-                'atr': round(atr_val, 2),
-                'entry_prompt_long': entry_long,
-                'entry_prompt_short': entry_short,
-                'opp_type': opp_type,
-                'rr_ratio': rr_ratio,
-                'volume': vol,
-                'position': pos,
-            })
-        except Exception as e:
-            failed.append((key, name_cn, str(e)[:30]))
-
-    # 按 R/R 降序排列
-    opportunities.sort(key=lambda x: x.get('rr_ratio') or 0, reverse=True)
-    return jsonify({
-        'opportunities': opportunities,
-        'total': len(opportunities),
-        'failed_count': len(failed),
-        'failed_sample': failed[:10],  # 最多显示10个失败样本
-    })
 
 @app.route('/api/quote/<variety>', methods=['GET'])
 def quote_variety(variety):
