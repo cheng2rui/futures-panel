@@ -363,6 +363,41 @@ def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) 
         # print(f"Sina direct fallback 失败 {variety}: {e}")  # 太吵，注释掉
         return None
 
+def _get_prev_close_and_change(variety, cur_price=None):
+    """返回 (prev_close, change_pct)。优先复用日线缓存，失败时返回 (None, None)。"""
+    try:
+        prefix = "".join(filter(str.isalpha, variety)).upper()
+        suffix = "".join(filter(str.isdigit, variety))
+        sym = f"{prefix}{suffix}"
+        cached = _cache.get_kline(sym)
+        df_d = cached[0] if cached else None
+        if df_d is None or len(df_d) < 2:
+            df_d = ak.futures_zh_daily_sina(symbol=sym)
+            if df_d is not None and len(df_d) > 20:
+                try:
+                    df_w_raw = df_d.copy()
+                    df_w_raw['date'] = pd.to_datetime(df_w_raw['date'], errors='coerce')
+                    df_w_raw = df_w_raw.set_index('date').sort_index()
+                    df_w = df_w_raw.resample('W').agg({'high': 'max', 'low': 'min', 'close': 'last'}).dropna().tail(12)
+                    _cache.set_kline(sym, (df_d, df_w))
+                except Exception:
+                    pass
+        if df_d is None or len(df_d) < 1:
+            return None, None
+        close_s = pd.to_numeric(df_d['close'], errors='coerce').dropna()
+        if close_s.empty:
+            return None, None
+        prev_close = float(close_s.iloc[-1])
+        if cur_price is None:
+            cur_price, _, _ = get_realtime_price(variety)
+        if cur_price is None or not prev_close:
+            return round(prev_close, 2), None
+        change_pct = round((float(cur_price) - prev_close) / prev_close * 100, 2)
+        return round(prev_close, 2), change_pct
+    except Exception:
+        return None, None
+
+
 def _refresh_price_now(variety):
     """同步刷新指定品种行情，立即抓取并写入缓存（用于添加持仓/自选时）"""
     result = _fetch_price_from_sina(variety)
@@ -1906,10 +1941,21 @@ def quote_variety(variety):
     (support, resistance, k_val, d_val, j_val, atr_val,
      oi_change, bb_pos, macd_h, vol_ratio, ma5_above_ma20,
      div_type, div_strength) = sr
+    prev_close, change_pct = _get_prev_close_and_change(variety, cur_price)
     if support is None:
-        return jsonify({"error": f"无法计算 {variety} 技术指标"}), 500
+        return jsonify({
+            "variety": variety.upper(),
+            "name": name,
+            "current_price": cur_price,
+            "preclose": prev_close,
+            "change_pct": change_pct,
+            "support": None,
+            "resistance": None,
+            "error": f"无法计算 {variety} 技术指标"
+        })
     result = {
         "variety": variety.upper(), "name": name, "current_price": cur_price,
+        "preclose": prev_close, "change_pct": change_pct,
         "support": support, "resistance": resistance,
         "atr": round(atr_val, 2) if atr_val else None,
         "kdj": {"K": round(k_val,1), "D": round(d_val,1), "J": round(j_val,1)} if k_val else None,
@@ -1950,10 +1996,16 @@ def quote_variety(variety):
         result[f'entry_prompt_{direction}'] = (
             round(support - 0.5 * atr, 2) if direction == 'long' else round(resistance + 0.5 * atr, 2)
         )
-        if cur_price != support:
-            rr = (resistance - cur_price) / (cur_price - support) if direction == 'long' \
-                 else (cur_price - support) / (resistance - cur_price)
-            result[f'rr_{direction}'] = round(rr, 2)
+        try:
+            if direction == 'long':
+                denom = (cur_price - support)
+                rr = ((resistance - cur_price) / denom) if denom else None
+            else:
+                denom = (resistance - cur_price)
+                rr = ((cur_price - support) / denom) if denom else None
+            result[f'rr_{direction}'] = round(rr, 2) if rr is not None else None
+        except Exception:
+            result[f'rr_{direction}'] = None
     return jsonify(result)
 
 @app.route('/api/lookup', methods=['GET'])
@@ -1973,9 +2025,23 @@ def lookup_variety():
 @app.route('/api/watchlist', methods=['GET', 'POST', 'DELETE'])
 def handle_watchlist():
     if request.method == 'GET':
-        # GET 返回统一格式：[{"variety": "TA2605"}, ...]
+        # GET 返回补齐后的统一格式，便于前端直接渲染涨跌幅/名称/现价
         wl = load_watchlist()
-        return jsonify([{"variety": v} if isinstance(v, str) else v for v in wl])
+        enriched = []
+        for item in wl:
+            variety = (item if isinstance(item, str) else item.get('variety', '')).strip().upper()
+            if not variety:
+                continue
+            cur_price, _, name = get_realtime_price(variety)
+            prev_close, change_pct = _get_prev_close_and_change(variety, cur_price)
+            enriched.append({
+                "variety": variety,
+                "name": name,
+                "current_price": round(cur_price, 2) if cur_price is not None else None,
+                "preclose": prev_close,
+                "change_pct": change_pct,
+            })
+        return jsonify(enriched)
     if request.method == 'POST':
         data = request.json or {}
         variety = data.get('variety', '').strip().upper()
@@ -2528,14 +2594,23 @@ def api_scan_opportunities():
         except Exception as e:
             return None
 
-    # 并发扫描所有品种（15线程，30秒超时）
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures = {executor.submit(scan_one, v): v for v in all_varieties}
-        for fut in as_completed(futures, timeout=30):
-            r = fut.result()
-            if r:
-                results.append(r)
+    # 并发扫描所有品种（15线程，15秒总超时；超时返回已收集结果）
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+    executor = ThreadPoolExecutor(max_workers=15)
+    futures = {executor.submit(scan_one, v): v for v in all_varieties}
+    try:
+        for fut in as_completed(futures, timeout=15):
+            try:
+                r = fut.result(timeout=1)
+                if r:
+                    results.append(r)
+            except Exception:
+                continue
+    except TimeoutError:
+        # 超时后直接返回已收集结果，避免前端一直转圈 / 500
+        pass
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     # 按条件数量降序排列
     results.sort(key=lambda x: (-len(x['reasons']), x['variety']))
