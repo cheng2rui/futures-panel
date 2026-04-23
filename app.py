@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 
 # 文件读写锁（防止并发写入竞争）
-_positions_lock = threading.Lock()
+_positions_lock = threading.RLock()  # RLock 避免重入死锁
 _watchlist_lock = threading.Lock()
 _candidates_lock = threading.Lock()
 # 候选池内存存储 {variety: {variety, name, best_side, best_reason, current_price, added_at, source}}
@@ -478,7 +478,7 @@ def _watchlist_broadcaster():
     """每5秒强制抓取自选合约价格并推送到所有SSE客户端；带缓存和并发加速"""
     global _last_watchlist_mtime
     while True:
-        time.sleep(5)
+        time.sleep(3)
         try:
             # 检测文件是否变更（避免每次全量读文件）
             if os.path.exists(WATCHLIST_FILE):
@@ -1514,7 +1514,7 @@ def sse_stream():
     try:
         while True:
             try:
-                msg = client_queue.get(timeout=55)
+                msg = client_queue.get(timeout=25)
                 yield msg
             except queue.Empty:
                 # 55秒无消息，发心跳保活（代理/Nginx 超时保活）
@@ -1793,11 +1793,13 @@ def handle_positions():
                         trail_price = min(prev_trail or 999999, new_trail) if prev_trail else new_trail
 
             out = dict(pos)
+            prev_close, change_pct = _get_prev_close_and_change(pos.get('variety', ''), cur_price)
             out.update({
                 'pnl': round(pnl, 0) if pnl is not None else None,
                 'current_price': cur_price,
-                'point_value': pv,
-                'variety_name': name,
+                'preclose': prev_close,
+                'change_pct': change_pct,
+                'variety_name': name or pos.get('name', ''),
                 'support': support,
                 'resistance': resistance,
                 'score': score,
@@ -1873,17 +1875,22 @@ def handle_positions():
 
 @app.route('/api/positions/<int:index>', methods=['DELETE'])
 def delete_position(index):
+    # 先拿到品种名（不需要锁）
+    positions_snapshot = load_positions()
+    target = next((p for p in positions_snapshot if p.get('_idx') == index), None)
+    if target is None:
+        return jsonify({"error": "持仓不存在"}), 404
+    target_variety = target.get('variety', '')
+    # 再加锁做删除
     with _positions_lock:
         positions = load_positions()
-        # 通过 _idx 匹配
-        target = next((p for p in positions if p.get('_idx') == index), None)
         new_positions = [p for p in positions if p.get('_idx') != index]
         if len(new_positions) == len(positions):
             return jsonify({"error": "持仓不存在"}), 404
         save_positions(new_positions)
-        # 删除时清除该品种缓存
-        if target:
-            _cache.invalidate(target.get('variety', ''))
+    # 缓存清理放到锁外面，不阻塞响应
+    if target_variety:
+        threading.Thread(target=lambda: _cache.invalidate(target_variety), daemon=True).start()
     return jsonify({"message": "已删除"})
 
 # ── 多周期共振 ─────────────────────────────────────────

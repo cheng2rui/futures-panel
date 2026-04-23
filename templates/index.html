@@ -2307,7 +2307,6 @@
           const r = await fetch(`${API}/api/quote/${encodeURIComponent(w.variety)}`);
           if (!r.ok) return null;
           const q = await r.json();
-          q.change_pct = w.change_pct;
           return q;
         } catch(e) {
           return null;
@@ -2514,8 +2513,12 @@
             <span>R/R空 ${rrStars(rrShortVal)}</span>
           `;
         } else if (infoRow) {
-          // 指标不可用时显示提示，不更新 R/R 行
-          infoRow.innerHTML = `<span style="color:#d97706;font-size:0.75rem">📊 指标暂不可用</span>`;
+          // 技术指标算不出时：有价格就只显示价格，不显示误导性提示
+          if (q.current_price != null) {
+            infoRow.innerHTML = `<span style="color:var(--text-dim);font-size:0.75rem">技术指标暂不可用</span>`;
+          } else {
+            infoRow.innerHTML = `<span style="color:#d97706;font-size:0.75rem">📊 指标暂不可用</span>`;
+          }
         }
       } catch(e) { console.error('wl refresh error', e); }
     }, 500);
