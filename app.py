@@ -371,18 +371,25 @@ def _get_prev_close_and_change(variety, cur_price=None):
     try:
         prefix = "".join(filter(str.isalpha, variety)).upper()
         suffix = "".join(filter(str.isdigit, variety))
-        sym = f"{prefix}{suffix}"
-        cached = _cache.get_kline(sym)
+        # 复用 get_realtime_price 的符号解析逻辑，保持一致
+        key = _resolve_variety_key(prefix)
+        meta = VARIETY_META_LOWER.get(key) if key else None
+        sina_sym = meta[1] if meta else None
+        if not sina_sym:
+            return None, None
+        # 有具体到期日的用 prefix+suffix（如 A2607），无到期日的用 prefix+0 连续合约（如 NI→NI0）
+        kline_sym = f"{prefix}{suffix}".upper() if suffix else f"{prefix}0".upper()
+        cached = _cache.get_kline(kline_sym)
         df_d = cached[0] if cached else None
         if df_d is None or len(df_d) < 2:
-            df_d = ak.futures_zh_daily_sina(symbol=sym)
+            df_d = ak.futures_zh_daily_sina(symbol=kline_sym)
             if df_d is not None and len(df_d) > 20:
                 try:
                     df_w_raw = df_d.copy()
                     df_w_raw['date'] = pd.to_datetime(df_w_raw['date'], errors='coerce')
                     df_w_raw = df_w_raw.set_index('date').sort_index()
                     df_w = df_w_raw.resample('W').agg({'high': 'max', 'low': 'min', 'close': 'last'}).dropna().tail(12)
-                    _cache.set_kline(sym, (df_d, df_w))
+                    _cache.set_kline(kline_sym, (df_d, df_w))
                 except Exception:
                     pass
         if df_d is None or len(df_d) < 1:
@@ -829,7 +836,9 @@ def _validate_variety_meta_async():
     else:
         print(f"  ✅ VARIETY_META 自检通过（{len(VARIETY_META)} 个品种）")
 
-threading.Thread(target=_validate_variety_meta_async, daemon=True).start()
+# v0.4.x: 启动时不再自动跑全量 VARIETY_META 自检，避免占满启动窗口导致接口初期超时
+# 如需诊断可手动调用该函数
+# threading.Thread(target=_validate_variety_meta_async, daemon=True).start()
 
 # ─────────────────────────────────────────────
 # POINT_VALUE：每跳动1个点的人民币金额（元/点/手）
@@ -1756,18 +1765,24 @@ def handle_positions():
                 if cur_price != support:
                     # 计算止损（先算出来再用于 R/R）
                     if direction == 'long':
-                        stop_loss = _ri(support - 0.5 * atr)
-                        # R/R = 剩余盈利 / 当前风险（从当前价到止损）
-                        risk = cur_price - stop_loss
-                        reward = resistance - cur_price
-                        rr_ratio = round(reward / risk, 2) if risk > 0 else None
+                        # 边界：价格已跌破支撑 → R/R 无意义，显示 None
+                        if cur_price <= support:
+                            rr_ratio = None
+                        else:
+                            stop_loss = _ri(support - 0.5 * atr)
+                            risk = cur_price - stop_loss
+                            reward = resistance - cur_price
+                            rr_ratio = round(reward / risk, 2) if risk > 0 else None
                         take_profit = resistance
                     else:
-                        stop_loss = _ri(resistance + 0.5 * atr)
-                        # R/R = 剩余盈利 / 当前风险（从当前价到止损）
-                        risk = stop_loss - cur_price
-                        reward = cur_price - support
-                        rr_ratio = round(reward / risk, 2) if risk > 0 else None
+                        # 边界：价格已涨破阻力 → R/R 无意义，显示 None
+                        if cur_price >= resistance:
+                            rr_ratio = None
+                        else:
+                            stop_loss = _ri(resistance + 0.5 * atr)
+                            risk = stop_loss - cur_price
+                            reward = cur_price - support
+                            rr_ratio = round(reward / risk, 2) if risk > 0 else None
                         take_profit = support
 
             # ── 追踪止损计算 ──
@@ -1899,8 +1914,7 @@ def api_resonance(variety):
     """多周期共振分析：日线×60分钟×15分钟共振信号"""
     result = calc_multi_resonance(variety)
     if result is None:
-        return jsonify({"error": f"无法获取 {variety} 共振数据"}), 500
-    return jsonify(result)
+        return jsonify({"error": f"无法获取 {variety} 共振数据"}), 200
 
 # ── 动态仓位建议 ─────────────────────────────────────────
 @app.route('/api/position_sizing', methods=['GET'])
@@ -2207,7 +2221,7 @@ def var_report():
             details.append({"variety": v, "var_95": round(daily_var_95), "var_99": round(daily_var_99)})
         return jsonify({"var_95": round(var_95), "var_99": round(var_99), "positions": details})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"VaR 计算失败: {str(e)}"}), 200
 
 # ── 趋势突破回测 ──────────────────────────────────────────
 def _backtest_one(variety, qty, pv, lookback, atr_mult, direction=None):
@@ -2546,7 +2560,7 @@ def chart_data(variety):
             df_w = df_w.dropna().tail(12)
             _cache.set_kline(sym, (df_d, df_w))
         except Exception as e:
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": f"图表数据获取失败: {str(e)}"}), 200
     if df_d is None or len(df_d) == 0:
         return jsonify({"error": f"无历史数据 {variety}"}), 404
     df_d = df_d.tail(60).copy()
@@ -2605,13 +2619,10 @@ def api_scan_opportunities():
             except Exception:
                 variety_full = prefix_upper
 
-            # 提速优化：price 和 SR 并行 fetch（两者独立，无依赖）
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=2) as pex:
-                f_price = pex.submit(get_realtime_price, variety_full)
-                f_sr = pex.submit(calc_sr_multi_period, variety_full)
-                price, unit, name = f_price.result(timeout=6)
-                sr = f_sr.result(timeout=8)
+            # v0.4.x：避免 scan 内部再开线程池，减少嵌套并发导致的偶发卡死/超时
+            # 外层 as_completed 已经并发，这里顺序执行更稳
+            price, unit, name = get_realtime_price(variety_full)
+            sr = calc_sr_multi_period(variety_full)
 
             if price is None or price <= 0:
                 return None

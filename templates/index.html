@@ -1486,6 +1486,19 @@
 
 <script>
   const API = window.location.origin;
+
+
+  function uent(s) {
+    if (s == null) return '';
+    if (typeof s !== 'string') return s;
+    try {
+      let r = s.replace(/\\u([0-9a-f]{4})/gi, (_, p) => String.fromCodePoint(parseInt(p, 16)));
+      const t = document.createElement('textarea');
+      t.innerHTML = r;
+      return t.value;
+    } catch(e) { return s; }
+  }
+
   let refreshTimer = null;
   let staleCheckTimer = null;   // P0-3 stale checker interval
   let sseStatusTimer = null;    // SSE status check interval
@@ -2348,17 +2361,17 @@
       const longSignal = (cp && el && cp <= el) ? { triggered: true, dist: ((cp - el) / el * 100) } : (cp && el ? { triggered: false, dist: ((cp - el) / el * 100) } : null);
       const shortSignal = (cp && es && cp >= es) ? { triggered: true, dist: ((es - cp) / es * 100) } : (cp && es ? { triggered: false, dist: ((es - cp) / es * 100) } : null);
       // v0.3.1: 只在指标有效时才计算入场信号
-      const entryBadge = indicatorsAvailable && (longSignal || shortSignal) ? `
+      const triggeredLong = longSignal && longSignal.triggered;
+      const triggeredShort = shortSignal && shortSignal.triggered;
+      const entryBadge = indicatorsAvailable && (triggeredLong || triggeredShort) ? `
         <div class="entry-badge-wrap" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
-          ${longSignal ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;${longSignal.triggered ? 'background:rgba(239,68,68,0.18);color:var(--red);border:1px solid rgba(239,68,68,0.3);animation:pulse-red 1.5s infinite' : 'background:rgba(239,68,68,0.08);color:var(--text-dim);border:1px solid rgba(239,68,68,0.15)'}">
-            🚀 做多 ${longSignal.triggered ? '入场!' : '机会'}
+          ${triggeredLong ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(239,68,68,0.18);color:var(--red);border:1px solid rgba(239,68,68,0.3);animation:pulse-red 1.2s infinite">
+            🚀 做多入场!
             <span style="opacity:0.8">${el}</span>
-            ${longSignal.dist ? `<span style="font-size:0.65rem;margin-left:3px">${longSignal.triggered ? '' : longSignal.dist > 0 ? '+' : ''}${longSignal.dist.toFixed(1)}%</span>` : ''}
           </span>` : ''}
-          ${shortSignal ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;${shortSignal.triggered ? 'background:rgba(34,197,94,0.18);color:var(--green);border:1px solid rgba(34,197,94,0.3);animation:pulse-green 1.5s infinite' : 'background:rgba(34,197,94,0.08);color:var(--text-dim);border:1px solid rgba(34,197,94,0.15)'}">
-            🎯 做空 ${shortSignal.triggered ? '入场!' : '机会'}
+          ${triggeredShort ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(34,197,94,0.18);color:var(--green);border:1px solid rgba(34,197,94,0.3);animation:pulse-green 1.2s infinite">
+            🎯 做空入场!
             <span style="opacity:0.8">${es}</span>
-            ${shortSignal.dist ? `<span style="font-size:0.65rem;margin-left:3px">${shortSignal.dist > 0 ? '+' : ''}${shortSignal.dist.toFixed(1)}%</span>` : ''}
           </span>` : ''}
         </div>` : '';
       return `
@@ -3214,10 +3227,23 @@
     }
   }
 
+  async function refreshWatchlistOnly() {
+    try {
+      await renderWatchlist();
+    } catch (e) {
+      console.error('watchlist refresh error', e);
+    }
+  }
+
   function setRefreshInterval(ms) {
     if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
     ms = parseInt(ms);
-    if (ms > 0) refreshTimer = setInterval(renderAll, ms);
+    if (ms > 0) {
+      refreshTimer = setInterval(() => {
+        // 自选优先轻量刷新；持仓/账户仍靠 SSE + 手动刷新
+        refreshWatchlistOnly();
+      }, ms);
+    }
   }
 
   // 页面加载时同步预警配置
@@ -3410,7 +3436,7 @@
         }
       } else if (item.best_reason === 'div_kdj') {
         const dv = (item.reasons || []).filter(r => r.type === 'div_kdj')[0];
-        if (dv) primaryBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:8px;font-size:0.75rem;font-weight:700;background:rgba(168,85,247,0.15);color:#a855f7;border:1px solid rgba(168,85,247,0.3)">💊 ' + (dv.text || '背离') + '</span>';
+        if (dv) primaryBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:8px;font-size:0.75rem;font-weight:700;background:rgba(168,85,247,0.15);color:#a855f7;border:1px solid rgba(168,85,247,0.3)">💊 ' + (uent(dv.text) || '背离') + '</span>';
       } else if (item.best_reason === 'double_rr') {
         const rr = (item.reasons || []).filter(r => r.type === 'double_rr')[0];
         if (rr) primaryBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:8px;font-size:0.75rem;font-weight:700;background:rgba(59,130,246,0.12);color:var(--blue);border:1px solid rgba(59,130,246,0.25)">📊 R' + rr.rr_long + '/' + rr.rr_short + '</span>';
@@ -3424,7 +3450,7 @@
           const b = r.side === 'long' ? 'rgba(239,68,68,0.07)' : 'rgba(34,197,94,0.07)';
           return '<span style="padding:2px 6px;border-radius:8px;font-size:0.65rem;font-weight:500;background:' + b + ';color:' + c + ';border:1px solid ' + c + '12">' + (r.side === 'long' ? '🚀' : '🌀') + r.dev_pct + '%</span>';
         }
-        if (r.type === 'div_kdj') return '<span style="padding:2px 6px;border-radius:8px;font-size:0.65rem;font-weight:500;background:rgba(168,85,247,0.07);color:#a855f7;border:1px solid rgba(168,85,247,0.12)">💊' + (r.text || '').replace('+', '') + '</span>';
+        if (r.type === 'div_kdj') return '<span style="padding:2px 6px;border-radius:8px;font-size:0.65rem;font-weight:500;background:rgba(168,85,247,0.07);color:#a855f7;border:1px solid rgba(168,85,247,0.12)">💊' + uent(r.text).replace('+', '') + '</span>';
         if (r.type === 'double_rr') return '<span style="padding:2px 6px;border-radius:8px;font-size:0.65rem;font-weight:500;background:rgba(59,130,246,0.07);color:var(--blue);border:1px solid rgba(59,130,246,0.12)">📊R' + r.rr_long + '/' + r.rr_short + '</span>';
         return '';
       }).join('');
@@ -3446,7 +3472,10 @@
       const kdjInfo = item.kdj_k ? ' · K=' + item.kdj_k + ' D=' + item.kdj_d : '';
       const secBadgesHtml = secBadges ? ' ' + secBadges : '';
 
-      return '<div style="background:var(--surface);border:1px solid ' + borderColor + ';border-radius:10px;padding:11px 13px;margin-bottom:9px;display:flex;align-items:center;gap:10px;transition:border-color 0.2s;position:relative;overflow:hidden" onmouseover="this.style.borderColor=\'var(--border-bright)\'" onmouseout="this.style.borderColor=\' + borderColor + \'">' +
+      const safeName = uent(item.name || '');
+      const safePrimaryBadge = String(primaryBadge || '').replace(/\uFFFD/g, '');
+      const safeSecBadgesHtml = String(secBadgesHtml || '').replace(/\uFFFD/g, '');
+      return '<div style="background:var(--surface);border:1px solid ' + borderColor + ';border-radius:10px;padding:11px 13px;margin-bottom:9px;display:flex;align-items:center;gap:10px;transition:border-color 0.2s;position:relative;overflow:hidden" onmouseover="this.style.borderColor=\'var(--border-bright)\'" onmouseout="this.style.borderColor=\'' + borderColor + '\'">' +
         leftBar +
         '<div style="display:flex;flex-direction:column;align-items:center;min-width:50px;max-width:56px;flex-shrink:0">' +
         '<span style="font-size:0.65rem;font-weight:700;color:' + dirColor + ';background:' + dirBg + ';padding:2px 6px;border-radius:6px;white-space:nowrap;line-height:1.4">' + dirLabel + '</span>' +
@@ -3454,8 +3483,8 @@
         '<div style="flex:1;min-width:0">' +
         '<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px">' +
         '<span style="font-size:0.92rem;font-weight:700;color:var(--text)">' + item.variety + '</span>' +
-        '<span style="font-size:0.7rem;color:var(--text-dim)">' + (item.name || '') + '</span>' + atrTag + '</div>' +
-        '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:2px">' + primaryBadge + secBadgesHtml + '</div>' +
+        '<span style="font-size:0.7rem;color:var(--text-dim)">' + safeName + '</span>' + atrTag + '</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:2px">' + safePrimaryBadge + safeSecBadgesHtml + '</div>' +
         '<div style="font-size:0.62rem;color:var(--text-dim)">支撑 <strong style="color:var(--text)">' + item.support + '</strong> · 阻力 <strong style="color:var(--text)">' + item.resistance + '</strong>' + kdjInfo + '</div></div>' +
         btnHtml + '</div>';
     }).join('');
@@ -3509,7 +3538,7 @@
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
       <div style="flex:1;min-width:180px">
         <div style="display:flex;align-items:center;gap:8px">
-          <div style="font-size:1rem;font-weight:700;color:var(--text)">\ud83d\udd0d 市场机会扫描</div>
+          <div style="font-size:1rem;font-weight:700;color:var(--text)">📡 市场机会扫描</div>
           <span id="scanCacheBadge" style="display:none;font-size:0.62rem;color:var(--text-dim);background:var(--surface-2);padding:1px 6px;border-radius:5px"></span>
         </div>
         <div style="font-size:0.72rem;color:var(--text-dim);margin-top:2px">满足任一条件：接近入场价 · MACD背离+KDJ共振 · 双边R/R>2</div>
@@ -3533,7 +3562,7 @@
         </select>
       </div>
       <button id="scanRefreshBtn" onclick="openScanModal(true)" style="background:var(--surface-2);border:1px solid var(--border);color:var(--text-dim);font-size:0.72rem;cursor:pointer;padding:4px 10px;border-radius:6px;margin-right:4px;font-family:inherit">🔄 刷新</button>
-      <button onclick="closeScanModal()" style="background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer;padding:4px 8px;border-radius:6px;line-height:1">\u2715</button>
+      <button onclick="closeScanModal()" style="background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer;padding:4px 8px;border-radius:6px;line-height:1">✕</button>
     </div>
     <div id="scanModalBody" style="flex:1;overflow-y:auto;padding:16px 20px">
       <div style="text-align:center;padding:30px;color:var(--text-dim)">点击「扫市场」开始扫描...</div>
