@@ -1,6 +1,7 @@
-# 版本: v0.3.2（2026-04-23）
-# 修复: 自选卡片增加删除按钮（头部×按钮，保证各端可见）
-#       /api/quote 返回 null support/resistance 时前端不显示误导性 R/R 与入场提示
+# 版本: v0.3.3（2026-04-23）
+# 优化: 扫市场提速（price+SR并行fetch，并发超时15s→10s）
+#       扫市场卡片信息化（方向色边条/方向标签/主次理由分层/RR数值展示）
+#       新增 best_side/best_reason 字段，前端返回 cache_age
 # ─────────────────────────────────────────────
 import json
 import os
@@ -2497,7 +2498,7 @@ def restart_server():
     t.start()
     return jsonify({'message': 'Restarting...'})
 
-# 扫市场机会扫描（v0.2.12）
+# 扫市场机会扫描（v0.3.3）
 # 条件：①接近入场价(偏离<2%) ②MACD背离+KDJ超买超卖共振 ③双边R/R>2
 _opportunities_cache = {'items': [], 'ts': 0.0}
 _opportunities_lock = threading.Lock()
@@ -2508,12 +2509,13 @@ def api_scan_opportunities():
     # 缓存60秒，避免频繁扫描
     with _opportunities_lock:
         if _opportunities_cache['items'] and (now - _opportunities_cache['ts']) < 60:
-            return jsonify({"cached": True, "count": len(_opportunities_cache['items']), "items": _opportunities_cache['items']})
+            return jsonify({"cached": True, "count": len(_opportunities_cache['items']),
+                            "items": _opportunities_cache['items'], "cache_age": round(now - _opportunities_cache['ts'])})
 
     results = []
     # 从 VARIETY_META 取出所有品种（排除非活跃）
     all_varieties = list(VARIETY_META.keys())
-    
+
     def scan_one(meta_key):
         """扫描单个品种机会，meta_key 如 'TA' 或 'cu'"""
         try:
@@ -2530,13 +2532,16 @@ def api_scan_opportunities():
             except Exception:
                 variety_full = prefix_upper
 
-            # 用 get_realtime_price 抓价格（内部走 Sina hq，akshare 作备用）
-            price, unit, name = get_realtime_price(variety_full)
+            # 提速优化：price 和 SR 并行 fetch（两者独立，无依赖）
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as pex:
+                f_price = pex.submit(get_realtime_price, variety_full)
+                f_sr = pex.submit(calc_sr_multi_period, variety_full)
+                price, unit, name = f_price.result(timeout=6)
+                sr = f_sr.result(timeout=8)
+
             if price is None or price <= 0:
                 return None
-
-            # calc_sr_multi_period 接受带后缀的合约名（内部用 prefix 匹配）
-            sr = calc_sr_multi_period(variety_full)
             if not sr or sr[0] is None:
                 return None
 
@@ -2577,6 +2582,22 @@ def api_scan_opportunities():
             if not reasons:
                 return None
 
+            # 派生字段：best_side（主要方向，取 near_entry 中偏离最小的那个）
+            near_entries = [r for r in reasons if r['type'] == 'near_entry']
+            if near_entries:
+                best_ne = min(near_entries, key=lambda r: r['dev_pct'])
+                best_side = best_ne['side']
+            else:
+                best_side = None
+
+            # 派生字段：best_reason（最重要理由：near_entry > div_kdj > double_rr）
+            if best_side:
+                best_reason = 'near_entry'
+            elif any(r['type'] == 'div_kdj' for r in reasons):
+                best_reason = 'div_kdj'
+            else:
+                best_reason = 'double_rr'
+
             return {
                 "variety": prefix_upper,
                 "name": name,
@@ -2589,16 +2610,18 @@ def api_scan_opportunities():
                 "kdj_d": round(d_val, 1) if d_val else None,
                 "atr": round(atr, 2) if atr else None,
                 "reasons": reasons,
+                "best_side": best_side,        # v0.3.3：方向（long/short/null）
+                "best_reason": best_reason,    # v0.3.3：主要理由类型
             }
         except Exception as e:
             return None
 
-    # 并发扫描所有品种（15线程，15秒总超时；超时返回已收集结果）
+    # 并发扫描所有品种（15线程，10秒总超时；超时返回已收集结果）
     from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
     executor = ThreadPoolExecutor(max_workers=15)
     futures = {executor.submit(scan_one, v): v for v in all_varieties}
     try:
-        for fut in as_completed(futures, timeout=15):
+        for fut in as_completed(futures, timeout=10):
             try:
                 r = fut.result(timeout=1)
                 if r:
@@ -2618,7 +2641,7 @@ def api_scan_opportunities():
         _opportunities_cache['items'] = results
         _opportunities_cache['ts'] = time.time()
 
-    return jsonify({"count": len(results), "items": results})
+    return jsonify({"count": len(results), "items": results, "cache_age": 0})
 
 if __name__ == '__main__':
     # 启动时后台预热持仓日线（避免首次访问卡顿）

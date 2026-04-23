@@ -1,4 +1,4 @@
-<!-- 版本: v0.3.2（2026-04-23）新增: 扫市场排序+筛选+已在自选状态 -->
+<!-- 版本: v0.3.3（2026-04-23）优化: 扫市场提速+卡片信息化 -->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -3083,14 +3083,18 @@
   }
 
   // ── 扫市场功能 ───────────────────────────────────────────
-  async function openScanModal() {
+  let _cachedScanCacheAge = 0; // v0.3.3
+
+  async function openScanModal(forceRefresh) {
     const modal = document.getElementById('scanModal');
     if (!modal) return;
     modal.style.display = 'flex';
     document.getElementById('scanModalBody').innerHTML = '<div style="text-align:center;padding:30px;color:var(--text-dim)">🔍 扫描全市场中...</div>';
     try {
+      // v0.3.3：强制刷新时加 ?t=timestamp 绕过浏览器缓存
+      const scanUrl = forceRefresh ? `${API}/api/scan_opportunities?t=${Date.now()}` : `${API}/api/scan_opportunities`;
       const [scanRes, wlRes] = await Promise.all([
-        fetch(`${API}/api/scan_opportunities`),
+        fetch(scanUrl),
         fetch(`${API}/api/watchlist`)
       ]);
       const data = await scanRes.json();
@@ -3099,9 +3103,29 @@
       window._cachedScanItems = data.items || [];
       window._cachedScanCached = data.cached;
       window._cachedScanWLSet = wlSet;
+      _cachedScanCacheAge = data.cache_age || 0; // v0.3.3
       renderScanResults(data.items || [], data.cached, wlSet);
+      updateScanHeader(data.cached, data.cache_age || 0);
     } catch(e) {
       document.getElementById('scanModalBody').innerHTML = `<div style="text-align:center;padding:30px;color:var(--red)">扫描失败: ${e.message}</div>`;
+    }
+  }
+
+  // v0.3.3：更新弹窗头部缓存状态和刷新按钮状态
+  function updateScanHeader(cached, cacheAge) {
+    const badge = document.getElementById('scanCacheBadge');
+    const refreshBtn = document.getElementById('scanRefreshBtn');
+    if (badge) {
+      if (cached && cacheAge > 0) {
+        badge.textContent = `缓存 ${cacheAge}秒前`;
+        badge.style.display = '';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = '🔄 刷新';
     }
   }
 
@@ -3169,46 +3193,68 @@
       return;
     }
     const html = filtered.map(item => {
-      const reasons = (item.reasons || []).map(r => {
+      // v0.3.3：卡片方向色（做多=红，做空=绿）
+      const dir = item.best_side;
+      const borderColor = dir === 'long' ? 'rgba(239,68,68,0.3)' : dir === 'short' ? 'rgba(34,197,94,0.3)' : 'var(--border)';
+      const dirColor = dir === 'long' ? 'var(--red)' : dir === 'short' ? 'var(--green)' : 'var(--text-dim)';
+      const dirBg = dir === 'long' ? 'rgba(239,68,68,0.1)' : dir === 'short' ? 'rgba(34,197,94,0.1)' : 'var(--surface-2)';
+      const dirLabel = dir === 'long' ? '🚀 做多' : dir === 'short' ? '🌀 做空' : '⚪ 中性';
+
+      // v0.3.3：primary reason badge
+      let primaryBadge = '';
+      if (item.best_reason === 'near_entry') {
+        const ne = (item.reasons || []).filter(r => r.type === 'near_entry').sort((a, b) => (a.dev_pct || 999) - (b.dev_pct || 999))[0];
+        if (ne) {
+          const c = ne.side === 'long' ? 'var(--red)' : 'var(--green)';
+          const b = ne.side === 'long' ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)';
+          primaryBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:8px;font-size:0.75rem;font-weight:700;background:' + b + ';color:' + c + ';border:1px solid ' + c + '30">' + (ne.side === 'long' ? '🚀' : '🌀') + ' ' + (ne.side === 'long' ? '做多' : '做空') + ' ' + ne.dev_pct + '%</span>';
+        }
+      } else if (item.best_reason === 'div_kdj') {
+        const dv = (item.reasons || []).filter(r => r.type === 'div_kdj')[0];
+        if (dv) primaryBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:8px;font-size:0.75rem;font-weight:700;background:rgba(168,85,247,0.15);color:#a855f7;border:1px solid rgba(168,85,247,0.3)">💊 ' + (dv.text || '背离') + '</span>';
+      } else if (item.best_reason === 'double_rr') {
+        const rr = (item.reasons || []).filter(r => r.type === 'double_rr')[0];
+        if (rr) primaryBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:8px;font-size:0.75rem;font-weight:700;background:rgba(59,130,246,0.12);color:var(--blue);border:1px solid rgba(59,130,246,0.25)">📊 R' + rr.rr_long + '/' + rr.rr_short + '</span>';
+      }
+
+      // secondary badges (reasons not already shown as primary)
+      const shownTypes = new Set([item.best_reason]);
+      const secBadges = (item.reasons || []).filter(r => !shownTypes.has(r.type)).map(r => {
         if (r.type === 'near_entry') {
-          const color = r.side === 'long' ? 'var(--red)' : 'var(--green)';
-          const bg = r.side === 'long' ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)';
-          const icon = r.side === 'long' ? '🚀' : '🌀';
-          const dir = r.side === 'long' ? '做多' : '做空';
-          return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:${bg};color:${color};border:1px solid ${color}20">${icon} ${dir}入场 ${r.dev_pct}%</span>`;
+          const c = r.side === 'long' ? 'var(--red)' : 'var(--green)';
+          const b = r.side === 'long' ? 'rgba(239,68,68,0.07)' : 'rgba(34,197,94,0.07)';
+          return '<span style="padding:2px 6px;border-radius:8px;font-size:0.65rem;font-weight:500;background:' + b + ';color:' + c + ';border:1px solid ' + c + '12">' + (r.side === 'long' ? '🚀' : '🌀') + r.dev_pct + '%</span>';
         }
-        if (r.type === 'div_kdj') {
-          return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(168,85,247,0.12);color:#a855f7;border:1px solid rgba(168,85,247,0.25)">💊 ${r.text}</span>`;
-        }
-        if (r.type === 'double_rr') {
-          return `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(59,130,246,0.1);color:var(--blue);border:1px solid rgba(59,130,246,0.2)">📊 双R/R>2</span>`;
-        }
+        if (r.type === 'div_kdj') return '<span style="padding:2px 6px;border-radius:8px;font-size:0.65rem;font-weight:500;background:rgba(168,85,247,0.07);color:#a855f7;border:1px solid rgba(168,85,247,0.12)">💊' + (r.text || '').replace('+', '') + '</span>';
+        if (r.type === 'double_rr') return '<span style="padding:2px 6px;border-radius:8px;font-size:0.65rem;font-weight:500;background:rgba(59,130,246,0.07);color:var(--blue);border:1px solid rgba(59,130,246,0.12)">📊R' + r.rr_long + '/' + r.rr_short + '</span>';
         return '';
-      }).join(' ');
+      }).join('');
+
       const inWL = wlSet.has((item.variety || '').trim().toUpperCase());
       const btnHtml = inWL
-        ? `<button disabled style="padding:7px 14px;border-radius:10px;border:1px solid rgba(34,197,94,0.3);background:rgba(34,197,94,0.08);color:rgba(34,197,94,0.6);font-size:0.8rem;font-weight:600;cursor:not-allowed;white-space:nowrap;font-family:inherit">✓ 已在自选</button>`
-        : `<button onclick="addToWatchlistFromScan('${item.variety}', this)" style="padding:7px 14px;border-radius:10px;border:none;background:rgba(168,85,247,0.15);color:#a855f7;font-size:0.8rem;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.2s" onmouseover="this.style.background='rgba(168,85,247,0.25)'" onmouseout="this.style.background='rgba(168,85,247,0.15)'">+ 自选</button>`;
-      return `
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:12px;transition:border-color 0.2s" onmouseover="this.style.borderColor='var(--border-bright)'" onmouseout="this.style.borderColor='var(--border)'">
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-              <span style="font-size:1rem;font-weight:700;color:var(--text)">${item.variety}</span>
-              <span style="font-size:0.78rem;color:var(--text-dim)">${item.name || ''}</span>
-              <span style="font-size:0.85rem;font-weight:600;color:var(--text);margin-left:4px">${item.current_price}</span>
-              ${cached ? '<span style="font-size:0.65rem;color:var(--text-dim);background:var(--surface-2);padding:1px 5px;border-radius:6px">缓存</span>' : ''}
-            </div>
-            <div style="display:flex;flex-wrap:wrap;gap:5px">${reasons}</div>
-            <div style="font-size:0.72rem;color:var(--text-dim);margin-top:5px">
-              支撑 ${item.support} · 阻力 ${item.resistance}
-              ${item.kdj_k ? ` · K=${item.kdj_k} D=${item.kdj_d}` : ''}
-              ${item.atr ? ` · ATR=${item.atr}` : ''}
-            </div>
-          </div>
-          ${btnHtml}
-        </div>`;
+        ? '<button disabled style="padding:6px 12px;border-radius:9px;border:1px solid rgba(34,197,94,0.3);background:rgba(34,197,94,0.08);color:rgba(34,197,94,0.6);font-size:0.78rem;font-weight:600;cursor:not-allowed;white-space:nowrap;font-family:inherit">✓ 自选</button>'
+        : '<button onclick="addToWatchlistFromScan(\'' + item.variety + '\', this)" style="padding:6px 12px;border-radius:9px;border:none;background:rgba(168,85,247,0.15);color:#a855f7;font-size:0.78rem;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.2s" onmouseover="this.style.background=\'rgba(168,85,247,0.25)\'" onmouseout="this.style.background=\'rgba(168,85,247,0.15)\'">+ 自选</button>';
+
+      // v0.3.3：新卡片布局
+      const leftBar = dir ? '<div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:' + dirColor + ';border-radius:2px 0 0 2px"></div>' : '';
+      const atrTag = item.atr ? '<span style="font-size:0.62rem;color:var(--text-dim);background:var(--surface-2);padding:1px 4px;border-radius:4px">ATR' + item.atr + '</span>' : '';
+      const kdjInfo = item.kdj_k ? ' · K=' + item.kdj_k + ' D=' + item.kdj_d : '';
+      const secBadgesHtml = secBadges ? ' ' + secBadges : '';
+
+      return '<div style="background:var(--surface);border:1px solid ' + borderColor + ';border-radius:10px;padding:11px 13px;margin-bottom:9px;display:flex;align-items:center;gap:10px;transition:border-color 0.2s;position:relative;overflow:hidden" onmouseover="this.style.borderColor=\'var(--border-bright)\'" onmouseout="this.style.borderColor=\' + borderColor + \'">' +
+        leftBar +
+        '<div style="display:flex;flex-direction:column;align-items:center;min-width:50px;max-width:56px;flex-shrink:0">' +
+        '<span style="font-size:0.65rem;font-weight:700;color:' + dirColor + ';background:' + dirBg + ';padding:2px 6px;border-radius:6px;white-space:nowrap;line-height:1.4">' + dirLabel + '</span>' +
+        '<span style="font-size:1.05rem;font-weight:700;color:var(--text);margin-top:4px">' + item.current_price + '</span></div>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px">' +
+        '<span style="font-size:0.92rem;font-weight:700;color:var(--text)">' + item.variety + '</span>' +
+        '<span style="font-size:0.7rem;color:var(--text-dim)">' + (item.name || '') + '</span>' + atrTag + '</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:2px">' + primaryBadge + secBadgesHtml + '</div>' +
+        '<div style="font-size:0.62rem;color:var(--text-dim)">支撑 <strong style="color:var(--text)">' + item.support + '</strong> · 阻力 <strong style="color:var(--text)">' + item.resistance + '</strong>' + kdjInfo + '</div></div>' +
+        btnHtml + '</div>';
     }).join('');
-    body.innerHTML = `<div style="max-height:70vh;overflow-y:auto;padding:4px">${html}</div>`;
+    body.innerHTML = '<div style="max-height:70vh;overflow-y:auto;padding:4px">' + html + '</div>';
   }
 
   async function addToWatchlistFromScan(variety, btn) {
@@ -3235,7 +3281,10 @@
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;width:100%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.4)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
       <div style="flex:1;min-width:180px">
-        <div style="font-size:1rem;font-weight:700;color:var(--text)">\ud83d\udd0d 市场机会扫描</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="font-size:1rem;font-weight:700;color:var(--text)">\ud83d\udd0d 市场机会扫描</div>
+          <span id="scanCacheBadge" style="display:none;font-size:0.62rem;color:var(--text-dim);background:var(--surface-2);padding:1px 6px;border-radius:5px"></span>
+        </div>
         <div style="font-size:0.72rem;color:var(--text-dim);margin-top:2px">满足任一条件：接近入场价 · MACD背离+KDJ共振 · 双边R/R>2</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -3256,6 +3305,7 @@
           <option value="rr">仅双R/R</option>
         </select>
       </div>
+      <button id="scanRefreshBtn" onclick="openScanModal(true)" style="background:var(--surface-2);border:1px solid var(--border);color:var(--text-dim);font-size:0.72rem;cursor:pointer;padding:4px 10px;border-radius:6px;margin-right:4px;font-family:inherit">🔄 刷新</button>
       <button onclick="closeScanModal()" style="background:none;border:none;color:var(--text-dim);font-size:1.2rem;cursor:pointer;padding:4px 8px;border-radius:6px;line-height:1">\u2715</button>
     </div>
     <div id="scanModalBody" style="flex:1;overflow-y:auto;padding:16px 20px">
