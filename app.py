@@ -21,6 +21,9 @@ import numpy as np
 # 文件读写锁（防止并发写入竞争）
 _positions_lock = threading.Lock()
 _watchlist_lock = threading.Lock()
+_candidates_lock = threading.Lock()
+# 候选池内存存储 {variety: {variety, name, best_side, best_reason, current_price, added_at, source}}
+_candidates = {}
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 
@@ -2022,6 +2025,69 @@ def lookup_variety():
     return jsonify({"variety": variety.upper(), "price": cur_price, "name": name})
 
 # ── 自选合约 ─────────────────────────────────────────────
+# ── 候选池（v0.4.0）──────────────────────────────────────────────
+@app.route('/api/candidates', methods=['GET', 'POST'])
+def handle_candidates():
+    global _candidates
+    if request.method == 'GET':
+        with _candidates_lock:
+            items = list(_candidates.values())
+        # 按 added_at 倒序
+        items.sort(key=lambda x: x.get('added_at', 0), reverse=True)
+        return jsonify(items)
+
+    # POST: 添加候选（from scan）
+    data = request.json or {}
+    variety = (data.get('variety') or '').strip().upper()
+    if not variety:
+        return jsonify({"error": "无效合约"}), 400
+    with _candidates_lock:
+        if variety in _candidates:
+            return jsonify({"message": "已在候选池", "candidates": list(_candidates.values())})
+        record = {
+            "variety": variety,
+            "name": data.get('name', ''),
+            "best_side": data.get('best_side'),
+            "best_reason": data.get('best_reason'),
+            "current_price": data.get('current_price'),
+            "added_at": time.time(),
+            "source": data.get('source', 'scan'),
+        }
+        _candidates[variety] = record
+    return jsonify({"message": "已加入候选池", "candidates": list(_candidates.values())})
+
+
+@app.route('/api/candidates/<variety>', methods=['DELETE'])
+def delete_candidate(variety):
+    variety = variety.strip().upper()
+    with _candidates_lock:
+        if variety not in _candidates:
+            return jsonify({"error": "候选不存在"}), 404
+        del _candidates[variety]
+    return jsonify({"message": "已移除", "candidates": list(_candidates.values())})
+
+
+@app.route('/api/candidates/<variety>/confirm', methods=['POST'])
+def confirm_candidate(variety):
+    """确认候选加入自选：添加到自选，然后从候选池移除"""
+    variety = variety.strip().upper()
+    # 取出候选记录
+    with _candidates_lock:
+        if variety not in _candidates:
+            return jsonify({"error": "候选不存在"}), 404
+        record = _candidates.pop(variety)
+
+    # 加入自选（复用 watchlist 逻辑）
+    wl = load_watchlist()
+    wl_strs = [v if isinstance(v, str) else v.get('variety', '') for v in wl]
+    if variety not in wl_strs:
+        wl.append(variety)
+        save_watchlist(wl)
+        threading.Thread(target=_refresh_price_now, args=(variety,), daemon=True).start()
+
+    return jsonify({"message": f"{variety} 已确认加入自选", "variety": variety})
+
+
 @app.route('/api/watchlist', methods=['GET', 'POST', 'DELETE'])
 def handle_watchlist():
     if request.method == 'GET':

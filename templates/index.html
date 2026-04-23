@@ -1104,6 +1104,7 @@
     <button class="top-tab" onclick="switchTab('positions-grid', this)">持仓</button>
     <button class="top-tab" onclick="switchTab('backtest-section', this)">回测</button>
     <button class="top-tab" onclick="switchTab('watchlist', this)">自选</button>
+    <button class="top-tab" onclick="switchTab('candidates-pool', this)" id="candidatesPoolTab">候选池<span id="candidatesPoolBadge" style="display:none;background:var(--blue);color:#fff;border-radius:10px;padding:1px 6px;font-size:0.68rem;font-weight:700;margin-left:4px">0</span></button>
     <!-- 右侧：移动端显示关键数据（PC端隐藏） -->
     <div class="top-nav-right">
       <!-- 移动端关键数据（PC端隐藏） -->
@@ -1389,6 +1390,28 @@
 
   </div>
 
+  </div>
+
+  <!-- 候选池面板（v0.4.0）-->
+  <div id="candidates-pool" style="display:none;padding:24px;background:var(--bg)">
+    <div style="max-width:800px;margin:0 auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+        <div>
+          <h2 style="font-size:1.1rem;font-weight:700;color:var(--text);margin:0">🎯 候选池</h2>
+          <div style="font-size:0.75rem;color:var(--text-dim);margin-top:4px">扫市场结果先进入候选池，二次确认后再加入自选</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="refreshCandidatesPool()" style="padding:7px 14px;background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:8px;font-size:0.8rem;cursor:pointer;font-family:inherit">🔄 刷新</button>
+          <button onclick="switchTab('watchlist', document.querySelector('[onclick*=watchlist]'))" style="padding:7px 14px;background:var(--blue);border:none;color:#fff;border-radius:8px;font-size:0.8rem;cursor:pointer;font-family:inherit;font-weight:600">📋 查看自选</button>
+        </div>
+      </div>
+      <div id="candidatesPoolEmpty" style="text-align:center;padding:60px 20px;color:var(--text-dim);background:var(--surface);border:1px solid var(--border);border-radius:12px">
+        <div style="font-size:2rem;margin-bottom:12px">🗂️</div>
+        <div style="font-size:0.9rem">候选池为空</div>
+        <div style="font-size:0.78rem;margin-top:6px">扫市场后点击「+ 候选池」将品种加入此处</div>
+      </div>
+      <div id="candidatesPoolList"></div>
+    </div>
   </div>
 
 <!-- Settings Modal -->
@@ -1799,6 +1822,24 @@
 
   // ── Tab Navigation ──────────────────────────────────
   function switchTab(id, btn) {
+    // 候选池：隐藏主网格，显示候选池面板
+    if (id === 'candidates-pool') {
+      document.getElementById('mainGrid').style.display = 'none';
+      const cp = document.getElementById('candidates-pool');
+      if (cp) {
+        cp.style.display = 'block';
+        cp.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      document.querySelectorAll('.top-tab').forEach(t => t.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      loadCandidatesPool();
+      return;
+    }
+    // 其他Tab：显示主网格，隐藏候选池面板
+    const mainGrid = document.getElementById('mainGrid');
+    if (mainGrid) mainGrid.style.display = '';
+    const cp = document.getElementById('candidates-pool');
+    if (cp) cp.style.display = 'none';
     const el = document.getElementById(id);
     if (!el) { console.warn('switchTab: element not found', id); return; }
     el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2025,6 +2066,156 @@
       alert('移除失败: ' + e.message);
     }
   }
+
+  // ── 候选池（v0.4.0）───────────────────────────────────────────
+  async function loadCandidatesPool() {
+    const listEl = document.getElementById('candidatesPoolList');
+    const emptyEl = document.getElementById('candidatesPoolEmpty');
+    if (!listEl) return;
+    try {
+      const res = await fetch(`${API}/api/candidates`);
+      const items = await res.json();
+      if (!items || items.length === 0) {
+        listEl.innerHTML = '';
+        if (emptyEl) emptyEl.style.display = '';
+        updateCandidatesBadge(0);
+        return;
+      }
+      if (emptyEl) emptyEl.style.display = 'none';
+      updateCandidatesBadge(items.length);
+      // 并行抓取现价
+      const enriched = await Promise.all(items.map(async item => {
+        try {
+          const r = await fetch(`${API}/api/quote/${encodeURIComponent(item.variety)}`);
+          if (!r.ok) return item;
+          const q = await r.json();
+          return { ...item, current_price: q.current_price, change_pct: q.change_pct };
+        } catch(e) { return item; }
+      }));
+      listEl.innerHTML = enriched.map(item => renderCandidateCard(item)).join('');
+    } catch(e) {
+      listEl.innerHTML = '<div style="text-align:center;padding:30px;color:var(--red)">加载失败: ' + e.message + '</div>';
+    }
+  }
+
+  async function refreshCandidatesPool() {
+    await loadCandidatesPool();
+  }
+
+  function renderCandidateCard(item) {
+    const v = (item.variety || '').toUpperCase();
+    const price = item.current_price != null ? item.current_price : '—';
+    const chg = item.change_pct;
+    const chgStr = chg != null ? (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%' : '';
+    const chgColor = chg > 0 ? 'var(--red)' : chg < 0 ? 'var(--green)' : 'var(--text-dim)';
+    const side = item.best_side;
+    const sideColor = side === 'long' ? 'var(--red)' : side === 'short' ? 'var(--green)' : 'var(--text-dim)';
+    const sideBg = side === 'long' ? 'rgba(239,68,68,0.1)' : side === 'short' ? 'rgba(34,197,94,0.1)' : 'var(--surface-2)';
+    const sideLabel = side === 'long' ? '🚀 做多' : side === 'short' ? '🌀 做空' : '⚪ 中性';
+    const reasonLabel = item.best_reason === 'near_entry' ? '接近入场' : item.best_reason === 'div_kdj' ? '背离信号' : item.best_reason === 'double_rr' ? '双边R/R' : (item.best_reason || '');
+    const addedDate = item.added_at ? new Date(item.added_at * 1000).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;gap:12px;transition:border-color 0.2s" onmouseover="this.style.borderColor='var(--border-bright)'" onmouseout="this.style.borderColor='var(--border)'">
+      <div style="display:flex;flex-direction:column;align-items:center;min-width:52px">
+        <span style="font-size:0.68rem;font-weight:700;color:${sideColor};background:${sideBg};padding:2px 6px;border-radius:6px;white-space:nowrap">${sideLabel}</span>
+        <span style="font-size:1.05rem;font-weight:700;color:var(--text);margin-top:4px">${price}</span>
+        <span style="font-size:0.65rem;color:${chgColor}">${chgStr}</span>
+      </div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:0.95rem;font-weight:700;color:var(--text)">${v}</span>
+          <span style="font-size:0.7rem;color:var(--text-dim)">${item.name || ''}</span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text-dim)">
+          <span style="background:var(--surface-2);padding:2px 6px;border-radius:4px;margin-right:6px">${reasonLabel}</span>
+          入池时间: ${addedDate}
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+        <button onclick="confirmCandidate('${v}', this)" style="padding:7px 14px;background:var(--blue);border:none;color:#fff;border-radius:8px;font-size:0.78rem;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit;transition:background 0.15s" onmouseover="this.style.background='#2563eb'" onmouseout="this.style.background='var(--blue)'">✓ 确认自选</button>
+        <button onclick="removeCandidate('${v}', this)" style="padding:7px 14px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);color:var(--red);border-radius:8px;font-size:0.78rem;font-weight:500;cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.15s" onmouseover="this.style.background='rgba(239,68,68,0.2)'" onmouseout="this.style.background='rgba(239,68,68,0.1)'">移除</button>
+      </div>
+    </div>`;
+  }
+
+  async function confirmCandidate(variety, btn) {
+    btn.disabled = true;
+    btn.textContent = '处理中...';
+    try {
+      const res = await fetch(`${API}/api/candidates/${encodeURIComponent(variety)}/confirm`, {method: 'POST'});
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || '操作失败'); btn.disabled = false; btn.textContent = '✓ 确认自选'; return; }
+      // 动画移除该卡片
+      const card = btn.closest('div[style*="border-radius:12px"]');
+      if (card) {
+        card.style.transition = 'opacity 0.3s, transform 0.3s';
+        card.style.opacity = '0';
+        card.style.transform = 'translateX(20px)';
+        setTimeout(() => { card.remove(); checkCandidatesEmpty(); }, 300);
+      }
+      updateCandidatesBadgeAfterRemove();
+    } catch(e) {
+      btn.disabled = false;
+      btn.textContent = '✓ 确认自选';
+      alert('操作失败: ' + e.message);
+    }
+  }
+
+  async function removeCandidate(variety, btn) {
+    if (!confirm(`确定从候选池移除 ${variety}？`)) return;
+    try {
+      const res = await fetch(`${API}/api/candidates/${encodeURIComponent(variety)}`, {method: 'DELETE'});
+      const data = await res.json();
+      if (!res.ok) { alert(data.error || '移除失败'); return; }
+      const card = btn.closest('div[style*="border-radius:12px"]');
+      if (card) {
+        card.style.transition = 'opacity 0.3s, transform 0.3s';
+        card.style.opacity = '0';
+        card.style.transform = 'translateX(20px)';
+        setTimeout(() => { card.remove(); checkCandidatesEmpty(); }, 300);
+      }
+      updateCandidatesBadgeAfterRemove();
+    } catch(e) {
+      alert('移除失败: ' + e.message);
+    }
+  }
+
+  function checkCandidatesEmpty() {
+    const listEl = document.getElementById('candidatesPoolList');
+    const emptyEl = document.getElementById('candidatesPoolEmpty');
+    if (!listEl) return;
+    if (listEl.querySelectorAll('div[style*="border-radius:12px"]').length === 0) {
+      if (emptyEl) emptyEl.style.display = '';
+      updateCandidatesBadge(0);
+    }
+  }
+
+  async function updateCandidatesBadgeAfterRemove() {
+    try {
+      const res = await fetch(`${API}/api/candidates`);
+      const items = await res.json();
+      updateCandidatesBadge(items ? items.length : 0);
+    } catch(e) { updateCandidatesBadge(0); }
+  }
+
+  function updateCandidatesBadge(count) {
+    const badge = document.getElementById('candidatesPoolBadge');
+    if (!badge) return;
+    if (count > 0) {
+      badge.textContent = count;
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  // 页面加载时也更新候选池badge（后台静默）
+  (async function initCandidatesBadge() {
+    try {
+      const res = await fetch(`${API}/api/candidates`);
+      const items = await res.json();
+      updateCandidatesBadge(items ? items.length : 0);
+    } catch(e) {}
+  })();
 
   function rrStars(rr) {
     if (rr == null || isNaN(rr)) return '<span style="color:var(--text-dim)">—</span>';
@@ -3093,18 +3284,22 @@
     try {
       // v0.3.3：强制刷新时加 ?t=timestamp 绕过浏览器缓存
       const scanUrl = forceRefresh ? `${API}/api/scan_opportunities?t=${Date.now()}` : `${API}/api/scan_opportunities`;
-      const [scanRes, wlRes] = await Promise.all([
+      const [scanRes, wlRes, candRes] = await Promise.all([
         fetch(scanUrl),
-        fetch(`${API}/api/watchlist`)
+        fetch(`${API}/api/watchlist`),
+        fetch(`${API}/api/candidates`)
       ]);
       const data = await scanRes.json();
       const watchlist = await wlRes.json();
+      const candidates = await candRes.json();
       const wlSet = new Set((watchlist || []).map(w => (w.variety || '').trim().toUpperCase()));
+      const candSet = new Set((candidates || []).map(c => (c.variety || '').trim().toUpperCase()));
       window._cachedScanItems = data.items || [];
       window._cachedScanCached = data.cached;
       window._cachedScanWLSet = wlSet;
+      window._cachedScanCandSet = candSet;
       _cachedScanCacheAge = data.cache_age || 0; // v0.3.3
-      renderScanResults(data.items || [], data.cached, wlSet);
+      renderScanResults(data.items || [], data.cached, wlSet, candSet);
       updateScanHeader(data.cached, data.cache_age || 0);
     } catch(e) {
       document.getElementById('scanModalBody').innerHTML = `<div style="text-align:center;padding:30px;color:var(--red)">扫描失败: ${e.message}</div>`;
@@ -3141,13 +3336,13 @@
   function doScanSort(val) {
     _scanSort = val;
     const items = window._cachedScanItems;
-    if (items) renderScanResults(items, window._cachedScanCached, window._cachedScanWLSet);
+    if (items) renderScanResults(items, window._cachedScanCached, window._cachedScanWLSet, window._cachedScanCandSet);
   }
 
   function doScanFilter(val) {
     _scanFilter = val;
     const items = window._cachedScanItems;
-    if (items) renderScanResults(items, window._cachedScanCached, window._cachedScanWLSet);
+    if (items) renderScanResults(items, window._cachedScanCached, window._cachedScanWLSet, window._cachedScanCandSet);
   }
 
   function applyScanSortFilter(items) {
@@ -3184,8 +3379,9 @@
     return filtered;
   }
 
-  function renderScanResults(items, cached, wlSet) {
+  function renderScanResults(items, cached, wlSet, candSet) {
     wlSet = wlSet || new Set();
+    candSet = candSet || new Set();
     const body = document.getElementById('scanModalBody');
     const filtered = applyScanSortFilter(items);
     if (!filtered.length) {
@@ -3231,9 +3427,15 @@
       }).join('');
 
       const inWL = wlSet.has((item.variety || '').trim().toUpperCase());
-      const btnHtml = inWL
-        ? '<button disabled style="padding:6px 12px;border-radius:9px;border:1px solid rgba(34,197,94,0.3);background:rgba(34,197,94,0.08);color:rgba(34,197,94,0.6);font-size:0.78rem;font-weight:600;cursor:not-allowed;white-space:nowrap;font-family:inherit">✓ 自选</button>'
-        : '<button onclick="addToWatchlistFromScan(\'' + item.variety + '\', this)" style="padding:6px 12px;border-radius:9px;border:none;background:rgba(168,85,247,0.15);color:#a855f7;font-size:0.78rem;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.2s" onmouseover="this.style.background=\'rgba(168,85,247,0.25)\'" onmouseout="this.style.background=\'rgba(168,85,247,0.15)\'">+ 自选</button>';
+      const inCand = candSet.has((item.variety || '').trim().toUpperCase());
+      let btnHtml;
+      if (inWL) {
+        btnHtml = '<button disabled style="padding:6px 10px;border-radius:9px;border:1px solid rgba(34,197,94,0.3);background:rgba(34,197,94,0.08);color:rgba(34,197,94,0.6);font-size:0.75rem;font-weight:600;cursor:not-allowed;white-space:nowrap;font-family:inherit">✓ 已在自选</button>';
+      } else if (inCand) {
+        btnHtml = '<button disabled style="padding:6px 10px;border-radius:9px;border:1px solid rgba(168,85,247,0.3);background:rgba(168,85,247,0.08);color:rgba(168,85,247,0.6);font-size:0.75rem;font-weight:600;cursor:not-allowed;white-space:nowrap;font-family:inherit">✓ 已加入候选池</button>';
+      } else {
+        btnHtml = '<button onclick="addToCandidatesFromScan(\'' + item.variety + '\', this)" style="padding:6px 10px;border-radius:9px;border:none;background:rgba(168,85,247,0.15);color:#a855f7;font-size:0.75rem;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.2s" onmouseover="this.style.background=\'rgba(168,85,247,0.25)\'" onmouseout="this.style.background=\'rgba(168,85,247,0.15)\'">+ 候选池</button>';
+      }
 
       // v0.3.3：新卡片布局
       const leftBar = dir ? '<div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:' + dirColor + ';border-radius:2px 0 0 2px"></div>' : '';
@@ -3255,6 +3457,28 @@
         btnHtml + '</div>';
     }).join('');
     body.innerHTML = '<div style="max-height:70vh;overflow-y:auto;padding:4px">' + html + '</div>';
+  }
+
+  async function addToCandidatesFromScan(variety, btn) {
+    btn.disabled = true;
+    btn.textContent = '添加中...';
+    try {
+      const res = await fetch(`${API}/api/candidates`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({variety: variety})
+      });
+      const data = await res.json();
+      btn.textContent = '✓ 已加入';
+      btn.style.background = 'rgba(168,85,247,0.2)';
+      btn.style.color = 'rgba(168,85,247,0.8)';
+      // 更新全局候选集合
+      window._cachedScanCandSet = window._cachedScanCandSet || new Set();
+      window._cachedScanCandSet.add(variety.toUpperCase());
+    } catch(e) {
+      btn.textContent = '添加失败';
+      btn.disabled = false;
+    }
   }
 
   async function addToWatchlistFromScan(variety, btn) {
