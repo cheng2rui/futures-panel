@@ -2643,8 +2643,8 @@ def api_scan_opportunities():
                 return None
 
             atr = atr_val or 0
-            entry_long = round(support - 0.3 * atr, 2) if support else None
-            entry_short = round(resistance + 0.3 * atr, 2) if resistance else None
+            entry_long = round(support + 0.5 * atr, 2) if support else None
+            entry_short = round(resistance - 0.5 * atr, 2) if resistance else None
 
             reasons = []
             # 条件1：接近入场价（偏离 < 2%）
