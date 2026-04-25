@@ -1012,99 +1012,107 @@ def calc_sr_score(price, support, resistance, entry_price, direction,
     if range_sr <= 0:
         return None, {}
 
-    # 1. 趋势（15%）
-    pir = (price - support) / range_sr
+    # ── 1. 趋势（15%）───────────────────────────────────────────────
+    pir = (price - support) / range_sr  # 0=在支撑，1=在阻力
     trend_s = (1 - pir) * 10 if direction == 'long' else pir * 10
     if ma5_above_ma20 is not None:
         trend_s *= 1.2 if ma5_above_ma20 else 0.85
-    trend_active = True
 
-    # 2. SR距离（15%）— 均值回归：价格越靠近入场S/R边际越好
+    # ── 2. SR距离（15%）────────────────────────────────────────────
+    # 均值回归版：离阻力越远→做多空间越大；离支撑越远→做空空间越大
+    # 与 KDJ/布林带方向一致（都在衡量价格相对通道的位置）
     if direction == 'long':
-        sr_s = (price - support) / range_sr * 10
-    else:
         sr_s = (resistance - price) / range_sr * 10
-    sr_active = True
+    else:
+        sr_s = (price - support) / range_sr * 10
 
-    # 3. KDJ（10%）
+    # ── 3. KDJ（10%）──────────────────────────────────────────────
     kdj_active = k_val is not None and d_val is not None and j_val is not None
     if kdj_active:
+        j_val = max(0, min(100, j_val))  # clamp 防止异常值
         if direction == 'long':
             kdj_s = 10.0 if j_val < 20 else (1.0 if j_val > 80 else 5.0 + (50 - abs(j_val - 50)) / 50 * 4)
         else:
             kdj_s = 10.0 if j_val > 80 else (1.0 if j_val < 20 else 5.0 + (50 - abs(j_val - 50)) / 50 * 4)
         if macd_hist is not None:
             if (direction == 'long' and macd_hist > 0) or (direction == 'short' and macd_hist < 0):
-                kdj_s = min(10, kdj_s + 1.0)
+                kdj_s = min(10.0, kdj_s + 1.0)
             else:
-                kdj_s = max(1, kdj_s - 0.5)
+                kdj_s = max(1.0, kdj_s - 0.5)
     else:
         kdj_s = None
 
-    # 4. 波动率（20%）— 高波动对所有方向都危险，做空尤甚（顺势持仓不怕回调，逆势持仓怕剧烈波动）
+    # ── 4. 波动率（20%）────────────────────────────────────────────
+    # 高波动对多空都是风险，不区别对待；用 ATR/价格 评估相对波动水平
     vol_active = atr_val is not None and price > 0
     if vol_active:
         vol_penalty = atr_val / price * 200
-        vol_s = max(1, min(10, 10 - vol_penalty))
-        if direction == 'short':
-            vol_s = max(1, min(10, vol_s - vol_penalty * 0.5))  # 做空：高波动双重惩罚
+        vol_s = max(1.0, min(10.0, 10 - vol_penalty))
     else:
         vol_s = None
 
-    # 5. OI（20%）
+    # ── 5. OI四象限（20%）─────────────────────────────────────────
+    # OI增减必须结合价格方向判断，不能单独看 sign
+    # price_return > 0 → 上涨；< 0 → 下跌
+    # 做多：价格上涨 + OI增加 = 最强确认；价格上涨 + OI减少 = 弱多（空头回补）
+    # 做空：价格下跌 + OI增加 = 最强确认；价格下跌 + OI减少 = 弱空（多头平仓）
     oi_active = oi_change is not None
     if oi_active:
-        oi_raw = oi_change * 40
+        price_up = 1 if price > entry_price else (-1 if price < entry_price else 0)
         if direction == 'long':
-            oi_s = max(1, min(10, 5.0 - oi_raw))
-        else:
-            oi_s = max(1, min(10, 5.0 + oi_raw))
+            if price_up > 0 and oi_change > 0:   oi_s = 9.0   # 顺势增仓，最强
+            elif price_up > 0 and oi_change < 0:  oi_s = 5.0   # 空头回补，弱多
+            elif price_up < 0 and oi_change > 0: oi_s = 2.0   # 新空入场，逆势，扣分
+            else:                                  oi_s = 6.0   # 多头平仓但未新空，中性偏好
+        else:  # short
+            if price_up < 0 and oi_change > 0:   oi_s = 9.0   # 顺势增仓，最强
+            elif price_up < 0 and oi_change < 0:  oi_s = 5.0   # 多头平仓，弱空
+            elif price_up > 0 and oi_change > 0: oi_s = 2.0   # 新多入场，逆势，扣分
+            else:                                  oi_s = 6.0   # 空头平仓但未新多，中性偏好
     else:
         oi_s = None
 
-    # 6. 布林带（10%）— 均值回归：价格越靠近下轨做多/越靠近上轨做空，得分越高
+    # ── 6. 布林带（10%）────────────────────────────────────────────
     bb_active = bb_position is not None
     if bb_active:
-        bb_pct = min(max(bb_position, 0), 1.0)
+        bb_pct = min(max(bb_position, 0.0), 1.0)
         bb_s = (1.0 - bb_pct) * 10 if direction == 'long' else bb_pct * 10
     else:
         bb_s = None
 
-    # 7. 成交量（10%）— 缩量反弹/回调是更好的顺势信号，放量则趋势可能逆转
-    # 做多：缩量(看多信号) > 温和 > 放量 > 爆量（可能反转）
-    # 做空：缩量下跌 > 温和 > 放量上涨 > 爆量（做空者应警惕）
+    # ── 7. 成交量（10%）───────────────────────────────────────────
+    # 0.8~1.3 区间最优（温和放量），过低/过高都扣分
     vol2_active = vol_ratio is not None and vol_ratio > 0
     if vol2_active:
-        if direction == 'long':
-            vol_s2 = 8.0 if vol_ratio < 0.7 else (6.0 if vol_ratio < 1.0 else (4.0 if vol_ratio < 1.5 else 2.5))
-        else:
-            vol_s2 = 8.0 if vol_ratio < 0.7 else (6.0 if vol_ratio < 1.0 else (4.0 if vol_ratio < 1.5 else 2.5))
-        # 无论方向，爆量都对持仓不利（趋势可能即将反转）
-        if vol_ratio >= 1.5:
-            vol_s2 = max(1.5, vol_s2 - 1.0)
+        vr = vol_ratio
+        if vr < 0.7:          vol_s2 = 5.0   # 过低，流动性/信号可靠性差
+        elif vr < 0.9:        vol_s2 = 8.0   # 缩量，趋势健康
+        elif vr <= 1.3:      vol_s2 = 9.0   # 温和放量，最优
+        elif vr < 1.5:       vol_s2 = 6.0   # 略偏高，可接受
+        else:                 vol_s2 = 3.0   # 爆量，趋势可能逆转
     else:
         vol_s2 = None
 
     WEIGHTS = {'trend': 0.15, 'sr': 0.15, 'kdj': 0.10, 'vol': 0.20, 'oi': 0.20, 'bb': 0.10, 'vol2': 0.10}
     active_weights = 0.0
     raw_score = 0.0
-    if trend_active: raw_score += trend_s * WEIGHTS['trend']; active_weights += WEIGHTS['trend']
-    if sr_active:    raw_score += sr_s * WEIGHTS['sr'];    active_weights += WEIGHTS['sr']
-    if kdj_active:   raw_score += kdj_s * WEIGHTS['kdj'];  active_weights += WEIGHTS['kdj']
-    if vol_active:   raw_score += vol_s * WEIGHTS['vol'];   active_weights += WEIGHTS['vol']
-    if oi_active:    raw_score += oi_s * WEIGHTS['oi'];    active_weights += WEIGHTS['oi']
-    if bb_active:    raw_score += bb_s * WEIGHTS['bb'];    active_weights += WEIGHTS['bb']
-    if vol2_active:  raw_score += vol_s2 * WEIGHTS['vol2']; active_weights += WEIGHTS['vol2']
+    raw_score += trend_s * WEIGHTS['trend'];  active_weights += WEIGHTS['trend']
+    raw_score += sr_s    * WEIGHTS['sr'];     active_weights += WEIGHTS['sr']
+    if kdj_s is not None: raw_score += kdj_s * WEIGHTS['kdj'];  active_weights += WEIGHTS['kdj']
+    if vol_s is not None: raw_score += vol_s * WEIGHTS['vol'];   active_weights += WEIGHTS['vol']
+    if oi_s is not None: raw_score += oi_s  * WEIGHTS['oi'];    active_weights += WEIGHTS['oi']
+    if bb_s is not None: raw_score += bb_s  * WEIGHTS['bb'];    active_weights += WEIGHTS['bb']
+    if vol_s2 is not None: raw_score += vol_s2 * WEIGHTS['vol2']; active_weights += WEIGHTS['vol2']
 
     total = raw_score * 10
 
     div_score = 0.0
     if div_type == 1:
-        div_score = min(10, (div_strength or 0)) if direction == 'long' else -3.0
+        div_score = min(10.0, (div_strength or 0)) if direction == 'long' else -3.0
     elif div_type == -1:
-        div_score = min(10, (div_strength or 0)) if direction == 'short' else -3.0
+        div_score = min(10.0, (div_strength or 0)) if direction == 'short' else -3.0
 
-    score = round(max(1, min(100, total + div_score)), 1)
+    score = round(max(1.0, min(100.0, total + div_score)), 1)
     detail = {
         "趋势":   round(trend_s * 10, 1),
         "SR距离": round(sr_s * 10, 1),
