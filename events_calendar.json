@@ -1,0 +1,16 @@
+[
+  {"date": "2026-05-08", "time": "20:30", "event": "USDA作物出口检验报告", "impact": "high", "bias": "利空", "varieties": ["M","Y","P","A","B","C","CS","JD"]},
+  {"date": "2026-05-09", "time": "20:30", "event": "USDA作物生长进度报告", "impact": "high", "bias": "利多", "varieties": ["M","Y","P","A","B","C","CS","JD"]},
+  {"date": "2026-05-12", "time": "10:00", "event": "中国4月CPI/PPI", "impact": "high", "bias": "中性", "varieties": ["CU","AL","ZN","RU","RB","HC","I","J","JM","NI"]},
+  {"date": "2026-05-14", "time": "20:30", "event": "美国4月CPI数据", "impact": "high", "bias": "利空", "varieties": ["SC","BR","NR","AU","AG","CU","NI"]},
+  {"date": "2026-05-21", "time": "04:30", "event": "API原油库存周报", "impact": "medium", "bias": "利空", "varieties": ["SC","BR","NR","RU"]},
+  {"date": "2026-05-22", "time": "20:30", "event": "USDA作物出口销售报告", "impact": "high", "bias": "利多", "varieties": ["M","Y","P","A","B","C"]},
+  {"date": "2026-05-28", "time": "04:30", "event": "EIA原油库存周报", "impact": "high", "bias": "利空", "varieties": ["SC","BR","NR"]},
+  {"date": "2026-06-03", "time": "22:00", "event": "USDA作物进度周报", "impact": "medium", "bias": "利多", "varieties": ["M","Y","P","A","B"]},
+  {"date": "2026-06-04", "time": "02:00", "event": "美联储FOMC利率决议", "impact": "high", "bias": "利空", "varieties": ["SC","BR","NR","AU","AG","CU","NI"]},
+  {"date": "2026-06-10", "time": "09:30", "event": "中国5月CPI/PPI", "impact": "high", "bias": "中性", "varieties": ["CU","AL","ZN","RU","RB","I","J","JM"]},
+  {"date": "2026-06-11", "time": "20:30", "event": "美国5月CPI数据", "impact": "high", "bias": "利空", "varieties": ["SC","BR","NR","AU","AG","CU"]},
+  {"date": "2026-06-25", "time": "04:30", "event": "EIA原油库存周报", "impact": "medium", "bias": "利空", "varieties": ["SC","BR","NR"]},
+  {"date": "2026-06-30", "time": "09:00", "event": "中国6月官方PMI", "impact": "medium", "bias": "利多", "varieties": ["CU","AL","RB","I","M","Y"]},
+  {"date": "2026-07-02", "time": "20:15", "event": "USDA作物进度周报", "impact": "medium", "bias": "利多", "varieties": ["M","Y","P","A","B","C"]}
+]

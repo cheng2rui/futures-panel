@@ -2821,6 +2821,131 @@ def api_scan_opportunities():
 
     return jsonify({"count": len(results), "items": results, "cache_age": 0})
 
+# ── 套利对扫描 v0.5.0 ────────────────────────────────
+@app.route('/api/scan_pair', methods=['POST'])
+def scan_pair():
+    data = request.json or {}
+    variety_a = data.get('variety_a', '').upper()
+    variety_b = data.get('variety_b', '').upper()
+    lookback = int(data.get('range', 60))
+    
+    if not variety_a or not variety_b:
+        return jsonify({'error': '需要 variety_a 和 variety_b'}), 400
+    
+    # Get current prices (continuous contracts)
+    price_a, _, _, _ = get_realtime_price(variety_a + '0')
+    price_b, _, _, _ = get_realtime_price(variety_b + '0')
+    if not price_a or not price_b:
+        return jsonify({'error': f'无法获取 {variety_a} 或 {variety_b} 价格'}), 404
+    
+    # Get daily K for spread
+    try:
+        prefix_a = ''.join(filter(str.isalpha, variety_a)).upper()
+        prefix_b = ''.join(filter(str.isalpha, variety_b)).upper()
+        sym_a = prefix_a + '0'
+        sym_b = prefix_b + '0'
+        df_a = ak.futures_zh_daily_sina(symbol=sym_a)
+        df_b = ak.futures_zh_daily_sina(symbol=sym_b)
+        if df_a is None or df_b is None or len(df_a) < lookback or len(df_b) < lookback:
+            return jsonify({'error': f'历史数据不足'}), 400
+        
+        closes_a = pd.to_numeric(df_a['close'], errors='coerce').dropna()
+        closes_b = pd.to_numeric(df_b['close'], errors='coerce').dropna()
+        min_len = min(len(closes_a), len(closes_b))
+        spread_series = (closes_a - closes_b).tail(min_len)
+        if len(spread_series) < 20:
+            return jsonify({'error': '数据不足'}), 400
+        
+        current_spread = float(spread_series.iloc[-1])
+        hist_percentile = float((spread_series < current_spread).sum() / len(spread_series) * 100)
+        
+        recent_avg = float(spread_series.tail(10).mean())
+        older_avg = float(spread_series.tail(30).head(20).mean())
+        std20 = float(spread_series.tail(20).std())
+        trend = 'narrowing' if recent_avg < older_avg else 'widening'
+        
+        percentile = hist_percentile / 100.0
+        if percentile < 0.3:
+            direction = 'long_a_short_b'
+            entry = current_spread - 0.3 * std20
+            target = older_avg + 0.3 * (older_avg - recent_avg)
+        elif percentile > 0.7:
+            direction = 'short_a_long_b'
+            entry = current_spread + 0.3 * std20
+            target = older_avg - 0.3 * (recent_avg - older_avg)
+        else:
+            direction = 'neutral'
+            entry = current_spread
+            target = older_avg
+        
+        stop = entry + 2 * std20 * (1 if direction == 'long_a_short_b' else -1)
+        rr = abs(target - entry) / abs(entry - stop) if abs(entry - stop) > 0.01 else 0
+        confidence = round(max(0, min(1, 1 - abs(0.5 - percentile) * 2)), 2)
+        
+        return jsonify({
+            'pair': f'{variety_a}-{variety_b}',
+            'current_spread': round(current_spread, 2),
+            'percentile': round(hist_percentile, 1),
+            'trend': trend,
+            'direction': direction,
+            'entry_spread': round(entry, 2),
+            'stop_spread': round(stop, 2),
+            'target_spread': round(target, 2),
+            'rr_ratio': round(rr, 2),
+            'confidence': confidence,
+            'price_a': price_a,
+            'price_b': price_b
+        })
+    except Exception as e:
+        return jsonify({'error': f'计算失败: {str(e)}'}), 500
+
+# ── 宏观事件日历 v0.5.0 ──────────────────────────────
+@app.route('/api/market_events', methods=['GET'])
+def market_events():
+    days = int(request.args.get('days', 30))
+    variety = request.args.get('variety', '')
+    
+    calendar_path = os.path.join(os.path.dirname(__file__), 'events_calendar.json')
+    try:
+        with open(calendar_path, 'r', encoding='utf-8') as f:
+            all_events = json.load(f)
+    except Exception:
+        all_events = []
+    
+    today = datetime.date.today()
+    cutoff = today + datetime.timedelta(days=days)
+    
+    events = []
+    for ev in all_events:
+        try:
+            ev_date = datetime.datetime.strptime(ev['date'], '%Y-%m-%d').date()
+        except:
+            continue
+        if not (today <= ev_date <= cutoff):
+            continue
+        if variety:
+            prefix = ''.join(filter(str.isalpha, variety)).upper()
+            if prefix not in [v.upper() for v in ev.get('varieties', [])]:
+                continue
+        ev_varieties = ev.get('varieties', [])
+        bias = ev.get('bias', '中性')
+        bias_icon = '🟢' if '利多' in bias else ('🔴' if '利空' in bias else '⚪')
+        impact = ev.get('impact', 'low')
+        impact_icon = '🔴' if impact == 'high' else ('🟡' if impact == 'medium' else '🟢')
+        events.append({
+            'date': ev['date'],
+            'time': ev.get('time', ''),
+            'event': ev['event'],
+            'impact': impact_icon,
+            'bias': f"{bias_icon} {bias}",
+            'varieties': ev_varieties,
+            'days_until': (ev_date - today).days
+        })
+    
+    events.sort(key=lambda x: x['date'])
+    return jsonify({'events': events, 'upcoming_count': len(events)})
+
+
 if __name__ == '__main__':
     # 启动时后台预热持仓日线（避免首次访问卡顿）
     _warm_klines_for_positions()
