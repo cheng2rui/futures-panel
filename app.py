@@ -608,8 +608,8 @@ _watchlist_thread = threading.Thread(target=_watchlist_broadcaster, daemon=True)
 _watchlist_thread.start()
 
 app = Flask(__name__,
-            template_folder='/Users/rey/.openclaw/workspace/futures-panel/templates',
-            static_folder='/Users/rey/.openclaw/workspace/futures-panel/static')
+            template_folder='/app/templates',
+            static_folder='/app/static')
 CORS(app)
 
 # Flask 500 错误统一处理（打印堆栈方便调试）
