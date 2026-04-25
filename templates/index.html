@@ -129,8 +129,8 @@
     }
 
     /* 数据陈旧置灰 (P0-3) */
-    [data-stale="true"] { opacity: 0.45 !important; }
-    [data-stale="true"]::after { content: none !important; }
+    [data-is-stale="true"] { opacity: 0.45 !important; }
+    [data-is-stale="true"]::after { content: none !important; }
 
     .main-content {
       flex: 1;
@@ -1743,9 +1743,9 @@
       const v = el.getAttribute('data-variety');
       const last = _dataFreshness[v] || 0;
       const stale = (now - last) > STALE_THRESHOLD_MS;
-      const wasStale = el.getAttribute('data-stale') === 'true';
+      const wasStale = el.getAttribute('data-is-stale') === 'true';
       if (stale !== wasStale) {
-        el.setAttribute('data-stale', stale ? 'true' : 'false');
+        el.setAttribute('data-is-stale', stale ? 'true' : 'false');
       }
     });
   }
@@ -2371,7 +2371,7 @@
             </div>
           </div>
           <div class="position-details">
-            <span class="live-price" data-stale="false">现价 ${q.current_price}</span>
+            <span class="live-price" data-is-stale="false">现价 ${q.current_price}</span>
           </div>
           <div style="margin-top:6px">
             <div class="position-score-bar-wrap">
@@ -2721,7 +2721,7 @@
             <span>${dirBadge}</span>
             <span>${d.quantity}手</span>
             <span>开${d.entry_price}</span>
-            <span class="live-price" data-stale="false">现${d.current_price}</span>
+            <span class="live-price" data-is-stale="false">现${d.current_price}</span>
           </div>
 
           <div class="position-score-bar-wrap">
