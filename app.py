@@ -2849,19 +2849,21 @@ def scan_pair():
         if df_a is None or df_b is None or len(df_a) < lookback or len(df_b) < lookback:
             return jsonify({'error': f'历史数据不足'}), 400
         
-        closes_a = pd.to_numeric(df_a['close'], errors='coerce').dropna()
-        closes_b = pd.to_numeric(df_b['close'], errors='coerce').dropna()
-        min_len = min(len(closes_a), len(closes_b))
-        spread_series = (closes_a - closes_b).tail(min_len)
-        if len(spread_series) < 20:
+        closes_a = pd.to_numeric(df_a['close'], errors='coerce').dropna().values
+        closes_b = pd.to_numeric(df_b['close'], errors='coerce').dropna().values
+        lookback = min(lookback, min(len(closes_a), len(closes_b)))
+        arr_a = closes_a[-lookback:]
+        arr_b = closes_b[-lookback:]
+        spread_arr = arr_a - arr_b
+        if lookback < 20:
             return jsonify({'error': '数据不足'}), 400
         
-        current_spread = float(spread_series.iloc[-1])
-        hist_percentile = float((spread_series < current_spread).sum() / len(spread_series) * 100)
+        current_spread = float(spread_arr[-1])
+        hist_percentile = float((spread_arr < current_spread).sum() / len(spread_arr) * 100)
         
-        recent_avg = float(spread_series.tail(10).mean())
-        older_avg = float(spread_series.tail(30).head(20).mean())
-        std20 = float(spread_series.tail(20).std())
+        recent_avg = float(spread_arr[-10:].mean())
+        older_avg = float(spread_arr[-30:-10].mean()) if len(spread_arr) >= 30 else float(spread_arr[:-10].mean())
+        std20 = float(spread_arr[-20:].std())
         trend = 'narrowing' if recent_avg < older_avg else 'widening'
         
         percentile = hist_percentile / 100.0
