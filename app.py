@@ -24,7 +24,7 @@ _watchlist_lock = threading.Lock()
 _candidates_lock = threading.Lock()
 # 候选池内存存储 {variety: {variety, name, best_side, best_reason, current_price, added_at, source}}
 _candidates = {}
-from flask import Flask, request, jsonify, render_template, make_response
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 
 # ─────────────────────────────────────────────
@@ -608,8 +608,8 @@ _watchlist_thread = threading.Thread(target=_watchlist_broadcaster, daemon=True)
 _watchlist_thread.start()
 
 app = Flask(__name__,
-            template_folder='/app/templates',
-            static_folder='/app/static')
+            template_folder='/Users/rey/.openclaw/workspace/futures-panel/templates',
+            static_folder='/Users/rey/.openclaw/workspace/futures-panel/static')
 CORS(app)
 
 # Flask 500 错误统一处理（打印堆栈方便调试）
@@ -1571,11 +1571,7 @@ def calc_position_sizing(equity, risk_pct, atr, pv):
 # ─────────────────────────────────────────────
 @app.route('/')
 def index():
-    response = make_response(render_template('index.html'))
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    return response
+    return render_template('index.html')
 
 
 # ── SSE 实时推送（v0.2.4：dict 连接管理，心跳保活，断连自动清理）──
