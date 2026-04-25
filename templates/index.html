@@ -3310,7 +3310,209 @@
     if (modal) modal.style.display = 'none';
   }
 
-  // ── 扫市场排序/筛选状态 ───────────────────────────────────
+  // ── 套利对扫描 ───────────────────────────────────────────
+  const PAIR_PRESETS = [
+    {a:'CU',b:'AL',label:'铜-铝'},
+    {a:'RB',b:'HC',label:'螺纹-热卷'},
+    {a:'TA',b:'MA',label:'PTA-甲醇'},
+    {a:'Y',b:'M',label:'豆油-豆粕'},
+    {a:'I',b:'JM',label:'铁矿-焦煤'},
+    {a:'SC',b:'BR',label:'原油-燃料'},
+  ];
+
+  function openPairScanModal() {
+    const modal = document.getElementById('pairScanModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    renderPairPresets();
+    const body = document.getElementById('pairScanBody');
+    if (body) body.innerHTML = '<div style="text-align:center;padding:30px;color:var(--text-dim)">选择预设对或输入品种后点击开始扫描</div>';
+  }
+
+  function closePairScanModal() {
+    const modal = document.getElementById('pairScanModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  function renderPairPresets() {
+    const container = document.getElementById('pairPresetsContainer');
+    if (!container) return;
+    container.innerHTML = PAIR_PRESETS.map(p =>
+      `<button onclick="fillPairPreset('${p.a}','${p.b}')" style="padding:5px 10px;border-radius:7px;border:1px solid rgba(234,179,8,0.3);background:rgba(234,179,8,0.07);color:#eab308;font-size:0.72rem;cursor:pointer;font-family:inherit">${p.label}</button>`
+    ).join('');
+  }
+
+  function fillPairPreset(a, b) {
+    const inpA = document.getElementById('pairVarietyA');
+    const inpB = document.getElementById('pairVarietyB');
+    if (inpA) inpA.value = a;
+    if (inpB) inpB.value = b;
+  }
+
+  async function doPairScan() {
+    const va = (document.getElementById('pairVarietyA')?.value || '').trim().toUpperCase();
+    const vb = (document.getElementById('pairVarietyB')?.value || '').trim().toUpperCase();
+    const range = parseInt(document.getElementById('pairRange')?.value || '60');
+    const body = document.getElementById('pairScanBody');
+    if (!va || !vb) { body.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px">请输入两个品种代码</div>'; return; }
+    if (va === vb) { body.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px">两个品种不能相同</div>'; return; }
+    body.innerHTML = '<div style="text-align:center;padding:30px;color:var(--text-dim)">⏳ 扫描中...</div>';
+    try {
+      const r = await fetch(`${API}/api/scan_pair`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({variety_a: va, variety_b: vb, range})
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(()=>({}));
+        body.innerHTML = `<div style="color:var(--red);text-align:center;padding:20px">❌ ${err.error || '扫描失败'}</div>`;
+        return;
+      }
+      const d = await r.json();
+      renderPairResult(d, va, vb, range);
+    } catch(e) {
+      body.innerHTML = `<div style="color:var(--red);text-align:center;padding:20px">❌ 网络错误: ${e.message}</div>`;
+    }
+  }
+
+  function renderPairResult(d, va, vb, range) {
+    const body = document.getElementById('pairScanBody');
+    if (!body) return;
+    const dir = d.direction || 'neutral';
+    const dirBadge = dir === 'long_a_short_b' ? '<span style="background:rgba(34,197,94,0.15);color:#22c55e;padding:3px 10px;border-radius:6px;font-size:0.78rem;font-weight:600">多A空B ↑</span>'
+                    : dir === 'short_a_long_b' ? '<span style="background:rgba(239,68,68,0.15);color:#ef4444;padding:3px 10px;border-radius:6px;font-size:0.78rem;font-weight:600">空A多B ↓</span>'
+                    : '<span style="background:rgba(156,163,175,0.15);color:#9ca3af;padding:3px 10px;border-radius:6px;font-size:0.78rem;font-weight:600">中性 —</span>';
+    const rr = d.rr_ratio || 0;
+    const rrStars = (r) => {
+      const n = Math.round(r * 2);
+      return '★'.repeat(Math.min(n,10)) + '☆'.repeat(Math.max(0,10-n));
+    };
+    const pct = d.percentile || 50;
+    const pctColor = pct < 30 ? '#22c55e' : pct > 70 ? '#ef4444' : '#9ca3af';
+    const trendIcon = d.trend === 'narrowing' ? '↘ 收敛' : '↗ 发散';
+    const conf = (d.confidence || 0) * 100;
+
+    body.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:1.05rem;font-weight:700;color:var(--text)">${d.pair || (va+'-'+vb)}</span>
+          ${dirBadge}
+        </div>
+
+        <div style="background:var(--surface-2);border-radius:12px;padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div><div style="font-size:0.65rem;color:var(--text-dim);margin-bottom:2px">当前价差</div><div style="font-size:1.1rem;font-weight:700;color:var(--text)">${d.current_spread?.toLocaleString() || '-'}</div></div>
+          <div><div style="font-size:0.65rem;color:var(--text-dim);margin-bottom:2px">历史分位</div><div style="font-size:1.1rem;font-weight:700;color:${pctColor}">${pct.toFixed(1)}%</div></div>
+          <div><div style="font-size:0.65rem;color:var(--text-dim);margin-bottom:2px">价格A</div><div style="font-size:0.9rem;font-weight:600;color:var(--text)">${va} ${d.price_a || '-'}</div></div>
+          <div><div style="font-size:0.65rem;color:var(--text-dim);margin-bottom:2px">价格B</div><div style="font-size:0.9rem;font-weight:600;color:var(--text)">${vb} ${d.price_b || '-'}</div></div>
+        </div>
+
+        <div>
+          <div style="font-size:0.7rem;color:var(--text-dim);margin-bottom:6px">分位 gauge（${pct.toFixed(1)}%）</div>
+          <div style="height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${pctColor};border-radius:4px;transition:width 0.3s"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.65rem;color:var(--text-dim);margin-top:2px"><span>0%</span><span>50%</span><span>100%</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center">
+          <div style="background:var(--surface-2);border-radius:10px;padding:10px 6px">
+            <div style="font-size:0.65rem;color:var(--text-dim)">入场价差</div>
+            <div style="font-size:0.9rem;font-weight:700;color:#22c55e">${typeof d.entry_spread === 'number' ? d.entry_spread.toLocaleString() : '-'}</div>
+          </div>
+          <div style="background:var(--surface-2);border-radius:10px;padding:10px 6px">
+            <div style="font-size:0.65rem;color:var(--text-dim)">目标价差</div>
+            <div style="font-size:0.9rem;font-weight:700;color:var(--text)">${typeof d.target_spread === 'number' ? d.target_spread.toLocaleString() : '-'}</div>
+          </div>
+          <div style="background:var(--surface-2);border-radius:10px;padding:10px 6px">
+            <div style="font-size:0.65rem;color:var(--text-dim)">止损价差</div>
+            <div style="font-size:0.9rem;font-weight:700;color:#ef4444">${typeof d.stop_spread === 'number' ? d.stop_spread.toLocaleString() : '-'}</div>
+          </div>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:rgba(234,179,8,0.07);border:1px solid rgba(234,179,8,0.2);border-radius:10px">
+          <div>
+            <div style="font-size:0.65rem;color:var(--text-dim)">R/R</div>
+            <div style="font-size:1rem;font-weight:700;color:#eab308">${rr.toFixed(2)} ${rrStars(rr)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:0.65rem;color:var(--text-dim)">置信度</div>
+            <div style="font-size:0.9rem;font-weight:600;color:var(--text)">${conf.toFixed(0)}%</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:0.65rem;color:var(--text-dim)">趋势</div>
+            <div style="font-size:0.85rem;font-weight:600;color:var(--text-dim)">${trendIcon}</div>
+          </div>
+        </div>
+
+        <div id="pairSpreadChart" style="height:200px;border-radius:10px;overflow:hidden;background:var(--surface-2)"></div>
+      </div>
+    `;
+
+    // Plot spread chart
+    setTimeout(() => drawPairSpreadChart(va, vb, range, d), 50);
+  }
+
+  async function drawPairSpreadChart(va, vb, range, scanData) {
+    const container = document.getElementById('pairSpreadChart');
+    if (!container) return;
+    if (!window.Plotly) {
+      container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:0.8rem">Plotly 加载中...</div>`;
+      return;
+    }
+    try {
+      const symA = va.toLowerCase() + '0';
+      const symB = vb.toLowerCase() + '0';
+      const [rA, rB] = await Promise.all([
+        fetch(`${API}/api/quote/${symA}`),
+        fetch(`${API}/api/quote/${symB}`)
+      ]);
+      const qA = rA.ok ? await rA.json() : null;
+      const qB = rB.ok ? await rB.json() : null;
+      const priceA = qA?.current_price || 0;
+      const priceB = qB?.current_price || 0;
+      const spread = scanData?.current_spread || (priceA - priceB);
+      const entry = scanData?.entry_spread || spread;
+      const target = scanData?.target_spread || spread;
+      const stop = scanData?.stop_spread || spread;
+      // Simple horizontal reference chart
+      const yVal = [priceB, priceB, priceA, priceA];
+      const xVal = ['B现价', 'B现价', 'A现价', 'A现价'];
+      const trace1 = {
+        x: ['B现价', 'A现价'],
+        y: [priceB, priceA],
+        type: 'scatter',
+        mode: 'lines+markers',
+        line: {color: '#9ca3af', width: 2},
+        marker: {size: 8},
+        name: '价格',
+        hovertemplate: '${y}<extra></extra>'
+      };
+      const traceEntry = {
+        x: ['B现价', 'A现价'],
+        y: [entry + priceB - priceA, entry],
+        type: 'scatter',
+        mode: 'lines',
+        line: {color: '#22c55e', width: 1.5, dash: 'dot'},
+        name: '入场价差',
+        hovertemplate: '入场 %{y:.2f}<extra></extra>'
+      };
+      const layout = {
+        margin: {l: 50, r: 20, t: 20, b: 40},
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        font: {color: '#9ca3af', size: 11},
+        xaxis: {title: '', gridcolor: '#1a2035'},
+        yaxis: {title: '价格', gridcolor: '#1a2035', side: 'left'},
+        showlegend: false,
+        height: 180,
+        hovermode: 'closest'
+      };
+      Plotly.newPlot(container, [trace1], layout, {displayModeBar: false});
+    } catch(e) {
+      container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:0.78rem">图表加载失败: ${e.message}</div>`;
+    }
+  }
+
   let _scanSort = 'near_entry';
   let _scanFilter = 'all';
 
@@ -3510,6 +3712,8 @@
         <input id="pairRange" type="number" value="60" min="20" max="300" style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-size:0.85rem;font-family:inherit;box-sizing:border-box">
       </div>
       <button onclick="doPairScan()" style="width:100%;padding:8px;border-radius:8px;border:none;background:rgba(234,179,8,0.15);color:#eab308;font-size:0.85rem;font-weight:700;cursor:pointer;font-family:inherit">🔍 开始扫描</button>
+      <div style="font-size:0.68rem;color:var(--text-dim);margin-top:4px">常用配对：</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px" id="pairPresetsContainer"></div>
     </div>
     <div id="pairScanBody" style="flex:1;overflow-y:auto;padding:16px 20px">
       <div style="text-align:center;padding:30px;color:var(--text-dim)">输入品种后点击开始扫描...</div>
