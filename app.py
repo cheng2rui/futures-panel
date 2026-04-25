@@ -24,7 +24,7 @@ _watchlist_lock = threading.Lock()
 _candidates_lock = threading.Lock()
 # 候选池内存存储 {variety: {variety, name, best_side, best_reason, current_price, added_at, source}}
 _candidates = {}
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, make_response
 from flask_cors import CORS
 
 # ─────────────────────────────────────────────
