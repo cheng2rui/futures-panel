@@ -2439,6 +2439,69 @@
     }
   }
 
+  // ── 宏观事件缓存 v0.5.0 ───────────────────────────────────
+  let _cachedEvents = [];
+
+  async function loadMarketEventsWidget(days = 30) {
+    const panel = document.getElementById('eventsPanelContent');
+    const badge = document.getElementById('eventsBadge');
+    if (!panel) return;
+    panel.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:40px;font-size:0.85rem">加载中...</div>';
+    try {
+      const r = await fetch(`${API}/api/market_events?days=${days}`);
+      if (!r.ok) throw new Error('加载失败');
+      const data = await r.json();
+      _cachedEvents = data.events || [];
+      // Update badge
+      if (badge) {
+        const total = _cachedEvents.length;
+        badge.textContent = total > 0 ? total : '';
+        badge.style.display = total > 0 ? 'inline' : 'none';
+      }
+      if (_cachedEvents.length === 0) {
+        panel.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:40px;font-size:0.85rem">近期无重大宏观事件</div>';
+        return;
+      }
+      panel.innerHTML = _cachedEvents.map(ev => {
+        const biasColor = ev.bias?.includes('利多') ? '#22c55e' : ev.bias?.includes('利空') ? '#ef4444' : '#9ca3af';
+        const impColor = ev.impact?.includes('🔴') ? '#ef4444' : ev.impact?.includes('🟡') ? '#f59e0b' : '#22c55e';
+        const dayLabel = ev.days_until === 0 ? '今日' : ev.days_until === 1 ? '明日' : `${ev.days_until}天后`;
+        return `
+          <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid var(--border);font-size:0.82rem">
+            <div style="min-width:50px;text-align:center">
+              <div style="font-size:0.7rem;color:var(--text-dim)">${dayLabel}</div>
+              <div style="font-size:0.65rem;color:var(--text-dim)">${ev.date?.slice(5)}</div>
+            </div>
+            <div style="flex:1">
+              <div style="font-weight:600;color:var(--text);margin-bottom:2px">${ev.event}</div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap">
+                <span style="background:${biasColor}22;color:${biasColor};padding:1px 7px;border-radius:5px;font-size:0.7rem">${ev.bias || ''}</span>
+                <span style="background:${impColor}22;color:${impColor};padding:1px 7px;border-radius:5px;font-size:0.7rem">${ev.impact || ''}影响</span>
+                <span style="color:var(--text-dim);font-size:0.7rem">${(ev.varieties || []).slice(0,5).join(' ')}</span>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+      // Also update any open watchlist cards with event tags
+      updateWatchlistEventTags();
+    } catch(e) {
+      if (panel) panel.innerHTML = `<div style="color:var(--red);text-align:center;padding:30px;font-size:0.82rem">加载失败: ${e.message}</div>`;
+    }
+  }
+
+  function updateWatchlistEventTags() {
+    if (!_cachedEvents || _cachedEvents.length === 0) return;
+    document.querySelectorAll('.variety-event-tag[id]').forEach(tag => {
+      const v = tag.id.replace('evt_', '');
+      const ev = _cachedEvents.find(e => (e.varieties || []).includes(v) && e.days_until <= 3);
+      if (ev) {
+        tag.textContent = '📅' + ev.days_until + '天';
+        tag.style.cssText = 'margin-left:5px;background:rgba(234,179,8,0.15);color:#eab308;padding:1px 6px;border-radius:5px;font-size:0.68rem;font-weight:600;display:inline;cursor:default';
+        tag.title = ev.event + (ev.time ? ' ' + ev.time : '');
+      }
+    });
+  }
+
   // ── 自选合约 SSE 实时更新 ───────────────────────────────
   let _wlRefreshTimer = null;
   async function updateWatchlistCard(variety, newPrice, sseData) {
