@@ -1571,7 +1571,11 @@ def calc_position_sizing(equity, risk_pct, atr, pv):
 # ─────────────────────────────────────────────
 @app.route('/')
 def index():
-    return render_template('index.html')
+    response = make_response(render_template('index.html'))
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 # ── SSE 实时推送（v0.2.4：dict 连接管理，心跳保活，断连自动清理）──
