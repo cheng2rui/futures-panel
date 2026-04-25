@@ -12,5 +12,6 @@ services:
       - ./watchlist.json:/app/watchlist.json
       - ./trades.json:/app/trades.json
       - ./account.json:/app/account.json
+      - ./events_calendar.json:/app/events_calendar.json
     environment:
       - TZ=Asia/Shanghai
