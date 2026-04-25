@@ -58,6 +58,11 @@ class CircuitBreakerCache:
         self._BREAKER_MAX_STALE = 120 # stale 数据最多保留 120 秒
         # k线原始数据缓存（用于预热和调试）
         self._kline_cache = {}
+        # 计算指标缓存（support/resistance/KDJ 等，TTL=60s）
+        self._ttl_indicator = 60
+        # 并发限制信号量：限制同时最多 N 个 Sina/AkShare 外部 API 调用
+        self._fetch_sem = threading.BoundedSemaphore(4)
+        self._fetching = set()   # 当前正在 fetch 的品种（防止同一品种重复抓取）
 
     # ── 底层存储（将来替换为 Redis）───
     def _mem_get(self, key):
@@ -179,6 +184,55 @@ class CircuitBreakerCache:
         key = f"kline:{sym}"
         with self._lock:
             self._mem[key] = (data, time.time(), self._ttl_kline)
+
+    def get_indicator(self, variety):
+        """缓存 computed 指标（support/resistance/KDJ 等），TTL=60s"""
+        key = f"ind:{variety}"
+        with self._lock:
+            if key in self._mem:
+                val, ts, _ = self._mem[key]
+                if time.time() - ts < self._ttl_indicator:
+                    return val
+        return None
+
+    def set_indicator(self, variety, data):
+        """存储 computed 指标"""
+        key = f"ind:{variety}"
+        with self._lock:
+            self._mem[key] = (data, time.time(), self._ttl_indicator)
+
+    def get_stale_info(self, variety):
+        """返回品种的熔断/stale 状态元数据，供 API 层暴露给前端"""
+        prefix = variety[:2].lower()
+        b = self._breaker.get(prefix, {})
+        state = b.get('state', 'closed')
+        is_stale = False
+        stale_age = None
+        if state == 'open':
+            is_stale = True
+            stale_age = round(time.time() - b.get('last_failure', 0), 1)
+        # 检查 price 是否为 stale
+        price_key = f"price:{variety}"
+        with self._lock:
+            if price_key in self._stale:
+                _, ts = self._stale[price_key]
+                stale_age = round(time.time() - ts, 1)
+                is_stale = True
+        return {"is_stale": is_stale, "stale_age": stale_age, "breaker_state": state}
+
+    def acquire_fetch(self, variety):
+        """获取指定品种的 fetch 许可；若该品种已在抓取中则阻塞等待"""
+        with self._lock:
+            while variety in self._fetching:
+                pass  # 等待（实际用条件变量更好，但简单方案：busy-wait 1ms）
+            self._fetching.add(variety)
+        self._fetch_sem.acquire()
+
+    def release_fetch(self, variety):
+        """释放 fetch 许可"""
+        self._fetch_sem.release()
+        with self._lock:
+            self._fetching.discard(variety)
 
     def invalidate(self, variety):
         """清除指定品种的行情缓存，下次访问会重新抓取"""
@@ -306,38 +360,47 @@ def _fetch_price_from_sina(variety: str) -> tuple | None:
     if prefix.upper() in INACTIVE_CONTRACTS:
         return None
     suffix = "".join(filter(str.isdigit, variety))
-    key = _resolve_variety_key(prefix)
-    meta = VARIETY_META_LOWER.get(key) if key else None
-    if not meta:
-        return None
-    sina_sym = meta[1]
+    _cache.acquire_fetch(variety)
+    try:
+        key = _resolve_variety_key(prefix)
+        meta = VARIETY_META_LOWER.get(key) if key else None
+        if not meta:
+            return None
+        sina_sym = meta[1]
 
-    # 策略1：akshare（带重试）
-    for attempt in range(3):
-        try:
-            df = ak.futures_zh_realtime(symbol=sina_sym)
-            if df is not None and not df.empty:
-                target_sym = sina_sym.upper() + suffix
-                for _, row in df.iterrows():
-                    sym = str(row.get('symbol', ''))
-                    if sym == variety or sym == variety.upper() or sym == target_sym:
-                        return (float(row['trade']), meta[2], meta[0])
-                for _, row in df.iterrows():
-                    sym = str(row.get('symbol', ''))
-                    name2 = str(row.get('name', ''))
-                    if prefix.upper() in sym.upper() or prefix in name2:
-                        return (float(row['trade']), meta[2], meta[0])
-                return None
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(0.5)
-                continue
-            print(f"Sina行情抓取失败({attempt+1}次) {variety}: {e}")
-            _cache.record_error(variety)
-            # 重试耗尽，继续走备用数据源（不要 return None）
+        # 策略1：akshare（带重试）
+        for attempt in range(3):
+            try:
+                df = ak.futures_zh_realtime(symbol=sina_sym)
+                if df is not None and not df.empty:
+                    target_sym = sina_sym.upper() + suffix
+                    for _, row in df.iterrows():
+                        sym = str(row.get('symbol', ''))
+                        if sym == variety or sym == variety.upper() or sym == target_sym:
+                            price = float(row['trade'])
+                            if price <= 0:  # 严格校验：price<=0 视为无效数据
+                                return None
+                            return (price, meta[2], meta[0])
+                    for _, row in df.iterrows():
+                        sym = str(row.get('symbol', ''))
+                        name2 = str(row.get('name', ''))
+                        if prefix.upper() in sym.upper() or prefix in name2:
+                            price = float(row['trade'])
+                            if price <= 0:
+                                return None
+                            return (price, meta[2], meta[0])
+                    return None
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.5)
+                    continue
+                print(f"Sina行情抓取失败({attempt+1}次) {variety}: {e}")
+                _cache.record_error(variety)
 
-    # 策略2：直接解析 Sina hq 接口（akshare 失败时的备用）
-    return _fetch_price_from_sina_direct(variety, prefix, suffix, meta)
+        # 策略2：直接解析 Sina hq 接口（akshare 失败时的备用）
+        return _fetch_price_from_sina_direct(variety, prefix, suffix, meta)
+    finally:
+        _cache.release_fetch(variety)
 
 def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) -> tuple | None:
     """备用：直接请求 Sina hq.sinajs.cn，绕过 akshare 的 demjson 解析器"""
@@ -361,6 +424,8 @@ def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) 
         if len(parts) < 4:
             return None
         price = float(parts[3])
+        if price <= 0:  # 严格校验
+            return None
         return (price, meta[2], meta[0])
     except Exception as e:
         # print(f"Sina direct fallback 失败 {variety}: {e}")  # 太吵，注释掉
@@ -399,7 +464,7 @@ def _get_prev_close_and_change(variety, cur_price=None):
             return None, None
         prev_close = float(close_s.iloc[-1])
         if cur_price is None:
-            cur_price, _, _ = get_realtime_price(variety)
+            cur_price, *_ = get_realtime_price(variety)
         if cur_price is None or not prev_close:
             return round(prev_close, 2), None
         change_pct = round((float(cur_price) - prev_close) / prev_close * 100, 2)
@@ -663,14 +728,16 @@ def get_realtime_price(variety):
     # 先查缓存
     price, name, cached_at = _cache.get_price(variety)
     if price is not None:
-        return price, name, cached_at
+        stale_info = _cache.get_stale_info(variety)
+        return price, name, cached_at, stale_info
     result = _fetch_price_from_sina(variety)
     if result:
         price, unit, name = result
         _cache.set_price(variety, price, unit, name)
         _broadcast_event('price_update', {"variety": variety, "price": price})
-        return price, unit, name
-    return None, None, None
+        stale_info = _cache.get_stale_info(variety)
+        return price, unit, name, stale_info
+    return None, None, None, {"is_stale": False, "stale_age": None, "breaker_state": "closed"}
 
 POSITIONS_FILE = '/app/positions.json'
 WATCHLIST_FILE = '/app/watchlist.json'
@@ -1149,7 +1216,12 @@ def calc_sr_multi_period(variety, daily_lookback=20, weekly_lookback=12):
     sina_symbol = key.upper() if key else prefix.upper()  # 交易所合约代码
     sym = f"{sina_symbol}{suffix}"
 
-    # 检查缓存（K线数据缓存 60 秒）
+    # 检查指标缓存（60s TTL，与 K线缓存独立）
+    cached_ind = _cache.get_indicator(variety)
+    if cached_ind is not None:
+        return cached_ind
+
+    # 检查缓存（K线数据缓存 300 秒）
     cached = _cache.get_kline(sym)
     if cached is not None:
         df_d, df_w = cached
@@ -1230,9 +1302,11 @@ def calc_sr_multi_period(variety, daily_lookback=20, weekly_lookback=12):
 
     div_type, div_strength = calc_divergence(df_d)
 
-    return (support, resistance, k_val, d_val, j_val, float(atr_val),
-            oi_change, bb_pos, macd_h, vol_ratio, ma5_above_ma20,
-            div_type, div_strength)
+    result = (support, resistance, k_val, d_val, j_val, float(atr_val),
+             oi_change, bb_pos, macd_h, vol_ratio, ma5_above_ma20,
+             div_type, div_strength)
+    _cache.set_indicator(variety, result)
+    return result
 
 # ─────────────────────────────────────────────
 # 追踪止损 ATR 获取
@@ -1677,7 +1751,7 @@ def check_alerts():
         qty = pos.get('quantity', 1)
         direction = pos.get('direction', 'long')
         entry = float(pos.get('entry_price', 0))
-        cur_price, _, _ = _price_cache.get(pos.get('variety', ''), (None, None, None))
+        cur_price, _, _, *_ = _price_cache.get(pos.get('variety', ''), (None, None, None, {}))
         if cur_price is None:
             continue
         sr = calc_sr_multi_period(pos.get('variety', ''))
@@ -1743,7 +1817,7 @@ def handle_positions():
             entry = float(pos.get('entry_price', 0))
             qty = float(pos.get('quantity', 1))
             direction = pos.get('direction', 'long')
-            cur_price, _, name = get_realtime_price(pos.get('variety', ''))
+            cur_price, _, name, stale_info = get_realtime_price(pos.get('variety', ''))
             pnl = None
             if cur_price:
                 pnl = (((cur_price - entry) * pv * qty) - (FEE_PER_LOT * qty) if direction == 'long'
@@ -1841,6 +1915,7 @@ def handle_positions():
                 'divergence': {"type": div_type, "strength": div_strength} if div_type != 0 else None,
                 'entry_prompt_long': entry_prompt_long,
                 'entry_prompt_short': entry_prompt_short,
+                'stale': stale_info,
             })
             # 动态仓位建议（海龟法则 ATR）
             if atr_val and atr_val > 0 and pv:
@@ -1859,7 +1934,7 @@ def handle_positions():
         for pos in positions:
             prefix = "".join(filter(str.isalpha, pos.get('variety', '')))
             pv = POINT_VALUE.get(prefix, 1)
-            cur_price, _, _ = get_realtime_price(pos.get('variety', ''))
+            cur_price, *_ = get_realtime_price(pos.get('variety', ''))
             if cur_price:
                 total_exposed += cur_price * pv * float(pos.get('quantity', 1))
         # 当前权益 = 余额 + 浮动盈亏
@@ -1949,7 +2024,7 @@ def api_position_sizing():
     if atr is None:
         # 无品种时用通用ATR估算（价格×2%）
         if variety:
-            cur, _, _ = get_realtime_price(variety)
+            cur, *_ = get_realtime_price(variety)
             if cur:
                 atr = cur * 0.02
                 pv = POINT_VALUE.get("".join(filter(str.isalpha, variety)).upper(), 1)
@@ -1966,7 +2041,7 @@ def quote_variety(variety):
     prefix = "".join(filter(str.isalpha, variety))
     suffix = "".join(filter(str.isdigit, variety))
     sym = f"{prefix.upper()}{suffix}"
-    cur_price, _, name = get_realtime_price(variety)
+    cur_price, _, name, stale_info = get_realtime_price(variety)
     if cur_price is None:
         return jsonify({"error": f"无法获取 {variety} 行情"}), 404
     sr = calc_sr_multi_period(variety)
@@ -1983,7 +2058,8 @@ def quote_variety(variety):
             "change_pct": change_pct,
             "support": None,
             "resistance": None,
-            "error": f"无法计算 {variety} 技术指标"
+            "error": f"无法计算 {variety} 技术指标",
+            "stale": stale_info,
         })
     result = {
         "variety": variety.upper(), "name": name, "current_price": cur_price,
@@ -1995,6 +2071,7 @@ def quote_variety(variety):
         "bb_position": round(bb_pos, 2) if bb_pos is not None else None,
         "vol_ratio": round(vol_ratio, 2) if vol_ratio is not None else None,
         "divergence": {"type": div_type, "strength": div_strength} if div_type != 0 else None,
+        "stale": stale_info,
     }
 
     # 多周期共振（附加到 quote 响应，默认关闭避免拖慢）
@@ -2057,7 +2134,7 @@ def lookup_variety():
     prefix = "".join(filter(str.isalpha, variety))
     suffix = "".join(filter(str.isdigit, variety))
     sym = f"{prefix.upper()}{suffix}"
-    cur_price, name, _ = get_realtime_price(variety)
+    cur_price, name, *_ = get_realtime_price(variety)
     if cur_price is None:
         return jsonify({"error": f"找不到 {variety}"}), 404
     return jsonify({"variety": variety.upper(), "price": cur_price, "name": name})
@@ -2136,7 +2213,7 @@ def handle_watchlist():
             variety = (item if isinstance(item, str) else item.get('variety', '')).strip().upper()
             if not variety:
                 continue
-            cur_price, _, name = get_realtime_price(variety)
+            cur_price, _, name, *_ = get_realtime_price(variety)
             prev_close, change_pct = _get_prev_close_and_change(variety, cur_price)
             enriched.append({
                 "variety": variety,
@@ -2189,7 +2266,7 @@ def var_report():
         rets = {}
         for pos in positions:
             v = pos.get('variety', '')
-            cur, _, _ = get_realtime_price(v)
+            cur, *_ = get_realtime_price(v)
             if cur:
                 prices[v] = cur
             prefix = "".join(filter(str.isalpha, v)).upper()
@@ -2638,7 +2715,7 @@ def api_scan_opportunities():
 
             # v0.4.x：避免 scan 内部再开线程池，减少嵌套并发导致的偶发卡死/超时
             # 外层 as_completed 已经并发，这里顺序执行更稳
-            price, unit, name = get_realtime_price(variety_full)
+            price, unit, name, *_ = get_realtime_price(variety_full)
             sr = calc_sr_multi_period(variety_full)
 
             if price is None or price <= 0:
