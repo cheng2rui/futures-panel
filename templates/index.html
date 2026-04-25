@@ -2482,8 +2482,9 @@
             </div>
           </div>`;
       }).join('');
-      // Also update any open watchlist cards with event tags
+      // Also update position and watchlist cards with event tags
       updateWatchlistEventTags();
+      updatePositionEventTags();
     } catch(e) {
       if (panel) panel.innerHTML = `<div style="color:var(--red);text-align:center;padding:30px;font-size:0.82rem">加载失败: ${e.message}</div>`;
     }
@@ -2492,7 +2493,21 @@
   function updateWatchlistEventTags() {
     if (!_cachedEvents || _cachedEvents.length === 0) return;
     document.querySelectorAll('.variety-event-tag[id]').forEach(tag => {
-      const v = tag.id.replace('evt_', '');
+      // Handle both evt_TA2609 (watchlist) and postevt_TA2609 (position)
+      const rawId = tag.id.replace('evt_', '').replace('postevt_', '');
+      const ev = _cachedEvents.find(e => (e.varieties || []).includes(rawId) && e.days_until <= 3);
+      if (ev) {
+        tag.textContent = '📅' + ev.days_until + '天';
+        tag.style.cssText = 'margin-left:5px;background:rgba(234,179,8,0.15);color:#eab308;padding:1px 6px;border-radius:5px;font-size:0.68rem;font-weight:600;display:inline;cursor:default';
+        tag.title = ev.event + (ev.time ? ' ' + ev.time : '');
+      }
+    });
+  }
+
+  function updatePositionEventTags() {
+    if (!_cachedEvents || _cachedEvents.length === 0) return;
+    document.querySelectorAll('[id^="postevt_"]').forEach(tag => {
+      const v = tag.id.replace('postevt_', '');
       const ev = _cachedEvents.find(e => (e.varieties || []).includes(v) && e.days_until <= 3);
       if (ev) {
         tag.textContent = '📅' + ev.days_until + '天';
@@ -2790,7 +2805,7 @@
         <div class="position-card ${scoreClass}" data-variety="${d.variety}">
           <div class="position-header">
             <div class="position-title">
-              ${d.variety} <span style="font-size:14px;color:var(--text-dim)">${varietyName}</span>
+              ${d.variety} <span style="font-size:14px;color:var(--text-dim)">${varietyName}</span><span class="variety-event-tag" id="postevt_${d.variety}" style="display:none"></span>
             </div>
             <div class="position-pnl ${pnlClass}">
               ${pnl > 0 ? '+' : ''}${pnl.toLocaleString()}
@@ -2844,6 +2859,27 @@
               }).join('')}
             </div>
           </div>` : ''}
+
+          ${(() => {
+            const prefix = (d.variety || '').replace(/\d+/g, '').toUpperCase();
+            const posEvents = (_cachedEvents || []).filter(e => (e.varieties || []).includes(prefix) && e.days_until <= 14);
+            if (posEvents.length === 0) return '';
+            const evRows = posEvents.slice(0, 2).map(ev => {
+              const biasColor = (ev.bias || '').includes('利多') ? '#22c55e' : (ev.bias || '').includes('利空') ? '#ef4444' : '#9ca3af';
+              const dayLbl = ev.days_until === 0 ? '今日' : ev.days_until === 1 ? '明日' : ev.days_until + '天后';
+              return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
+                <span style="font-size:0.65rem;color:var(--text-dim);min-width:38px">${dayLbl}</span>
+                <span style="font-size:0.72rem;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ev.event}</span>
+                <span style="font-size:0.65rem;color:${biasColor};white-space:nowrap">${(ev.bias||'').replace(/[🟢🔴⚪]/g,'')}</span>
+              </div>`;
+            }).join('');
+            return `<div style="margin-top:6px;padding:6px 8px;background:rgba(234,179,8,0.06);border:1px solid rgba(234,179,8,0.15);border-radius:8px;font-size:0.75rem">
+              <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px">
+                <span style="font-size:0.72rem;font-weight:600;color:#eab308">📅 近期宏观</span>
+              </div>
+              ${evRows}
+            </div>`;
+          })()}
 
           <div class="position-actions">
             <button class="chart-button" onclick="showChart('${d.variety}', ${d.entry_price || 0}, '${d.direction}')"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><rect x="8" y="6" width="8" height="12" rx="2"/></svg> K线图</button>
@@ -3303,6 +3339,15 @@
   if (typeof loadMarketEventsWidget === 'function') {
     loadMarketEventsWidget(30).catch(() => {});
   }
+  // v0.5.1: 持仓详情页事件区块 — 事件加载后重新渲染持仓卡片
+  const _origLoadMarketEventsWidget = typeof loadMarketEventsWidget === 'function' ? loadMarketEventsWidget : null;
+  window.loadMarketEventsWidget = async function(days) {
+    if (_origLoadMarketEventsWidget) await _origLoadMarketEventsWidget(days);
+    // Re-render positions to show related event blocks
+    if (typeof renderPositions === 'function' && lastPositionsData && lastPositionsData.length > 0) {
+      renderPositions(lastPositionsData);
+    }
+  };
   setRefreshInterval(document.getElementById('refreshInterval').value);
   syncAlertConfig();  // 同步声音开关状态
   // 页面加载时预请求通知权限
