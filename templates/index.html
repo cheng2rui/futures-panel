@@ -130,9 +130,7 @@
 
     /* 数据陈旧置灰 (P0-3) */
     [data-stale="true"] { opacity: 0.45 !important; }
-    [data-stale="true"]::after {
-      content: " (stale)"; font-size: 0.7em; color: var(--text-dim);
-    }
+    [data-stale="true"]::after { content: none; }
 
     .main-content {
       flex: 1;
@@ -2347,8 +2345,6 @@
       const resistText = q.resistance ? `阻 ${q.resistance}` : '—';
       // v0.3.1: indicatorsAvailable 保护 — support/resistance 为 null 时不显示误导性 R/R 和入场提示
       const indicatorsAvailable = !q.error && q.support != null && q.resistance != null;
-      const entryLong = indicatorsAvailable && q.entry_prompt_long ? `做多入 ${q.entry_prompt_long}` : null;
-      const entryShort = indicatorsAvailable && q.entry_prompt_short ? `做空入 ${q.entry_prompt_short}` : null;
       // R/R ratio — 前端展示用 rr_ratio（方向跟随 current_direction 或固定多头）
       const cp = q.current_price, sup = q.support, res = q.resistance;
       const rrLong = (cp && sup && res && cp > sup) ? parseFloat(((res - cp) / (cp - sup)).toFixed(2)) : null;
@@ -2363,17 +2359,6 @@
       // v0.3.1: 只在指标有效时才计算入场信号
       const triggeredLong = longSignal && longSignal.triggered;
       const triggeredShort = shortSignal && shortSignal.triggered;
-      const entryBadge = indicatorsAvailable && (triggeredLong || triggeredShort) ? `
-        <div class="entry-badge-wrap" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
-          ${triggeredLong ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(239,68,68,0.18);color:var(--red);border:1px solid rgba(239,68,68,0.3);animation:pulse-red 1.2s infinite">
-            🚀 做多入场!
-            <span style="opacity:0.8">${el}</span>
-          </span>` : ''}
-          ${triggeredShort ? `<span style="padding:3px 8px;border-radius:12px;font-size:0.72rem;font-weight:600;background:rgba(34,197,94,0.18);color:var(--green);border:1px solid rgba(34,197,94,0.3);animation:pulse-green 1.2s infinite">
-            🎯 做空入场!
-            <span style="opacity:0.8">${es}</span>
-          </span>` : ''}
-        </div>` : '';
       return `
         <div class="position-card" style="min-width:280px;flex:1;position:relative" data-variety="${q.variety}">
           <div class="position-header">
@@ -2404,13 +2389,6 @@
             <span>${resistText}</span>
             <span>R/R空 ${rrStars(rrShort)}</span>
           </div>
-          ${entryBadge}
-          ${(entryLong || entryShort) ? `
-          <div class="entry-detail-row" style="margin-top:6px;padding:6px 8px;background:var(--surface-2);border-radius:8px;font-size:0.78rem;display:flex;flex-direction:column;gap:3px">
-            ${entryLong ? `<span style="color:var(--red)">做多入 ${entryLong}</span>` : ''}
-            ${entryShort ? `<span style="color:var(--green)">做空入 ${entryShort}</span>` : ''}
-          </div>` : ''}
-
           ${(q.resonance) ? `
           <div style="margin-top:6px;padding:5px 8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);border-radius:8px;font-size:0.75rem">
             <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2428,43 +2406,10 @@
             </div>
           </div>` : ''}
 
-          ${(q.position_sizing) ? `
-          <div style="margin-top:6px;padding:5px 8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);border-radius:8px;font-size:0.75rem">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-              <span style="color:var(--blue);font-weight:600">📐 仓位</span>
-              <span>建议 <b>${q.position_sizing.recommended_size}手</b> / 最大 <b>${q.position_sizing.max_size}手</b></span>
-            </div>
-            <div style="color:var(--text-dim);margin-top:2px">ATR ${q.position_sizing.atr || '-'} · 单笔风险 ¥${(q.position_sizing.risk_amount||0).toLocaleString()}</div>
-          </div>` : ''}
           ` : `
           <div style="margin-top:6px;padding:6px 10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:8px;font-size:0.78rem;color:#d97706">
             📊 指标暂不可用，仅显示基础行情
           </div>`}
-          ${(q.resonance) ? `
-          <div style="margin-top:6px;padding:5px 8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);border-radius:8px;font-size:0.75rem">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-              <span style="color:#a855f7;font-weight:600">🔊 共振</span>
-              <span style="font-weight:600;${q.resonance.resonance_direction===1?'color:var(--green)':(q.resonance.resonance_direction===-1?'color:var(--red)':'color:var(--text-dim)')}">${q.resonance.recommendation || ''} ${q.resonance.resonance_score || ''}</span>
-            </div>
-            <div style="display:flex;gap:5px;margin-top:2px">
-              ${['日线','60分钟','15分钟'].map(tf => {
-                const p = q.resonance.periods ? q.resonance.periods[tf] : null;
-                if (!p) return '';
-                const dirColor = p.direction===1?'var(--green)':(p.direction===-1?'var(--red)':'var(--text-dim)');
-                const dirLabel = p.direction===1?'↑':(p.direction===-1?'↓':'—');
-                return `<span style="color:${dirColor}">${tf} ${dirLabel}</span>`;
-              }).join('')}
-            </div>
-          </div>` : ''}
-          ${(q.position_sizing) ? `
-          <div style="margin-top:6px;padding:5px 8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);border-radius:8px;font-size:0.75rem">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-              <span style="color:var(--blue);font-weight:600">📐 仓位</span>
-              <span>建议 <b>${q.position_sizing.recommended_size}手</b> / 最大 <b>${q.position_sizing.max_size}手</b></span>
-            </div>
-            <div style="color:var(--text-dim);margin-top:2px">ATR ${q.position_sizing.atr || '-'} · 单笔风险 ¥${(q.position_sizing.risk_amount||0).toLocaleString()}</div>
-          </div>` : ''}
-
           <div class="position-actions" style="margin-top:8px">
             <button onclick="removeFromWatchlist('${q.variety}')" style="background:none;border:1px solid var(--border);color:var(--text-dim);padding:4px 10px;border-radius:6px;font-size:0.78rem;cursor:pointer">移除自选</button>
           </div>
@@ -2802,20 +2747,6 @@
             🐢 追踪${d.direction === 'long' ? '多' : '空'}: ${d.trail_price}
           </div>` : `
           <div class="trail-badge" style="display:none"></div>`}
-
-          ${(d.position_sizing) ? `
-          <div style="margin-top:6px;padding:6px 8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.18);border-radius:8px;font-size:0.78rem">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
-              <span style="color:var(--blue);font-weight:600">📐 仓位建议</span>
-              <span style="color:var(--text-dim)">风险${d.position_sizing.risk_pct}%/笔</span>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <span>建议 <b style="color:var(--text)">${d.position_sizing.recommended_size}手</b></span>
-              <span>上限 <b style="color:var(--text)">${d.position_sizing.max_size}手</b></span>
-              <span>ATR <b style="color:var(--text)">${d.position_sizing.atr || '-'}</b></span>
-              <span>单笔风险 <b style="color:var(--red)">¥${(d.position_sizing.risk_amount||0).toLocaleString()}</b></span>
-            </div>
-          </div>` : ''}
 
           ${(d.resonance) ? `
           <div style="margin-top:6px;padding:6px 8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.18);border-radius:8px;font-size:0.78rem">
