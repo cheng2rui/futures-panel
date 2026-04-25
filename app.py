@@ -558,7 +558,7 @@ INACTIVE_CONTRACTS = {'PS', 'TL', 'BR'}
 _market_cache = CircuitBreakerCache(ttl_price=60, ttl_market=60, ttl_kline=300)
 
 # ── 账户资金配置 ─────────────────────────────────────────
-ACCOUNT_FILE = '/Users/rey/.openclaw/workspace/futures-panel/account.json'
+ACCOUNT_FILE = '/app/account.json'
 _ACCOUNT_LOCK = threading.Lock()
 
 def _load_account():
@@ -672,9 +672,9 @@ def get_realtime_price(variety):
         return price, unit, name
     return None, None, None
 
-POSITIONS_FILE = '/Users/rey/.openclaw/workspace/futures-panel/positions.json'
-WATCHLIST_FILE = '/Users/rey/.openclaw/workspace/futures-panel/watchlist.json'
-TRADES_FILE   = '/Users/rey/.openclaw/workspace/futures-panel/trades.json'
+POSITIONS_FILE = '/app/positions.json'
+WATCHLIST_FILE = '/app/watchlist.json'
+TRADES_FILE   = '/app/trades.json'
 
 if not os.path.exists(POSITIONS_FILE):
     with open(POSITIONS_FILE, 'w') as f:
@@ -1760,8 +1760,8 @@ def handle_positions():
                     vol_ratio=vol_ratio, ma5_above_ma20=ma5_above_ma20,
                     div_type=div_type, div_strength=div_strength)
                 atr = atr_val or 0
-                entry_prompt_long = _ri(support + 0.3 * atr) if support else None
-                entry_prompt_short = _ri(resistance - 0.3 * atr) if resistance else None
+                entry_prompt_long = _ri(support + 0.5 * atr) if support else None
+                entry_prompt_short = _ri(resistance - 0.5 * atr) if resistance else None
                 if cur_price != support:
                     # 计算止损（先算出来再用于 R/R）
                     if direction == 'long':
@@ -2017,16 +2017,25 @@ def quote_variety(variety):
             div_type=div_type, div_strength=div_strength)
         atr = atr_val or 0
         result[f'score_{direction}'] = score
-        result[f'entry_prompt_{direction}'] = (
-            round(support - 0.5 * atr, 2) if direction == 'long' else round(resistance + 0.5 * atr, 2)
-        )
+        # entry_prompt: 多头在支撑上方0.5*ATR入场，空头在阻力下方0.5*ATR入场
+        if direction == 'long':
+            result['entry_prompt_long'] = round(support + 0.5 * atr, 2) if support else None
+        else:
+            result['entry_prompt_short'] = round(resistance - 0.5 * atr, 2) if resistance else None
+        # R/R：价格已突破支撑/阻力时返回 None（无意义）
         try:
             if direction == 'long':
-                denom = (cur_price - support)
-                rr = ((resistance - cur_price) / denom) if denom else None
+                if cur_price <= support:
+                    rr = None
+                else:
+                    denom = cur_price - support
+                    rr = ((resistance - cur_price) / denom) if denom else None
             else:
-                denom = (resistance - cur_price)
-                rr = ((cur_price - support) / denom) if denom else None
+                if cur_price >= resistance:
+                    rr = None
+                else:
+                    denom = resistance - cur_price
+                    rr = ((cur_price - support) / denom) if denom else None
             result[f'rr_{direction}'] = round(rr, 2) if rr is not None else None
         except Exception:
             result[f'rr_{direction}'] = None
