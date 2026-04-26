@@ -40,4 +40,4 @@ COPY static/ static/
 
 # Flask 运行
 EXPOSE 8318
-CMD ["python", "app.py", "--port", "8318", "--host", "0.0.0.0"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8318", "--workers", "4", "--worker-class", "gevent", "--timeout", "30", "--keep-alive", "60", "--access-logfile", "-", "--error-logfile", "-", "app:app"]

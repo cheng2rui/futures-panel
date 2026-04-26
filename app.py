@@ -11,7 +11,18 @@ import signal
 import math
 import threading
 import datetime
-import requests
+# 全局 timeout 保护：所有 requests 调用默认超时，防止 akshare 网络卡死进程
+import requests as _requests
+_old_get = _requests.Session.get
+_old_post = _requests.Session.post
+def _get_with_timeout(self, url, **kw):
+    kw.setdefault('timeout', (5, 15))
+    return _old_get(self, url, **kw)
+def _post_with_timeout(self, url, **kw):
+    kw.setdefault('timeout', (5, 15))
+    return _post_with_timeout(self, url, **kw)
+_requests.Session.get = _get_with_timeout
+_requests.Session.post = _post_with_timeout
 import traceback
 import queue
 import akshare as ak
@@ -1238,8 +1249,6 @@ def calc_sr_multi_period(variety, daily_lookback=20, weekly_lookback=12):
             df_w = df_w.dropna().tail(weekly_lookback)
             _cache.set_kline(sym, (df_d, df_w))
         except (ValueError, Exception) as e:
-            # ValueError: akshare 返回空数据时列名不匹配（如 Length mismatch）
-            # 清除缓存中可能损坏的数据，下次重试
             _cache._kline_cache.pop(sym, None)
             print(f"SR计算失败 {variety}: {e}")
             return (None,) * 13
