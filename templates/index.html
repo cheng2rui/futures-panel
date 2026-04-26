@@ -1856,6 +1856,13 @@
     // Update active tab
     document.querySelectorAll('.top-tab').forEach(t => t.classList.remove('active'));
     if (btn) btn.classList.add('active');
+    // 宏观事件 tab 点击时加载数据
+    if (id === 'events-widget') {
+      const days = parseInt(document.getElementById('eventsDaysFilter')?.value || 30);
+      if (typeof loadMarketEventsWidget === 'function') {
+        loadMarketEventsWidget(days).catch(() => {});
+      }
+    }
   }
 
 // ── Widget Tabs ───────────────────────────────────
