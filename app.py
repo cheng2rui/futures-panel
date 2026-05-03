@@ -536,7 +536,14 @@ def _get_prev_close_and_change(variety, cur_price=None):
 
 
 def _refresh_price_now(variety):
-    """同步刷新指定品种行情，立即抓取并写入缓存（用于添加持仓/自选时）"""
+    """"同步刷新指定品种行情，立即抓取并写入缓存（用于添加持仓/自选时）"""
+    prefix = "".join(filter(str.isalpha, variety)).upper()
+    if prefix in GLOBAL_FUTURES_CODES:
+        result = _fetch_global_futures_price(prefix)
+        if result:
+            price, exchange, name = result
+            _cache.set_price(variety, price, exchange, name)  # (price, unit=交易所, name)
+        return
     result = _fetch_price_from_sina(variety)
     if result:
         price, unit, name = result
@@ -799,7 +806,7 @@ def get_realtime_price(variety: str):
     price, unit, name = _cache.get_price(variety)
     if price is not None:
         stale_info = _cache.get_stale_info(variety)
-        return price, name, cached_at, stale_info
+        return price, name, None, stale_info
     result = _fetch_price_from_sina(variety)
     if result:
         price, unit, name = result
@@ -2736,15 +2743,19 @@ def confirm_candidate(variety):
 @app.route('/api/watchlist', methods=['GET', 'POST', 'DELETE'])
 def handle_watchlist():
     if request.method == 'GET':
-        # GET 返回补齐后的统一格式，便于前端直接渲染涨跌幅/名称/现价
         wl = load_watchlist()
         enriched = []
         for item in wl:
             variety = (item if isinstance(item, str) else item.get('variety', '')).strip().upper()
             if not variety:
                 continue
+            prefix = "".join(filter(str.isalpha, variety))
             cur_price, _, name, *_ = get_realtime_price(variety)
-            prev_close, change_pct = _get_prev_close_and_change(variety, cur_price)
+            # 全球期货用外盘昨收，国内期货用原有逻辑
+            if prefix.upper() in GLOBAL_FUTURES_CODES:
+                prev_close, change_pct = _get_global_prev_close(prefix.upper())
+            else:
+                prev_close, change_pct = _get_prev_close_and_change(variety, cur_price)
             enriched.append({
                 "variety": variety,
                 "name": name,
