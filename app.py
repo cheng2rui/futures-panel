@@ -1,4 +1,4 @@
-# 版本: v0.8.1（2026-05-03）
+# 版本: v0.9.0（2026-05-03）轻量DataHub + safe_ak_call
 # 升级: 真实保证金率表(MARGIN_RATE) + 按品种手续费(COMMISSION) + 涨跌停板限制(PRICE_LIMIT)
 #       新增 api/trade/check 开仓前风控端点
 #       持仓展示增加 margin_rate / commission_total 字段
@@ -30,6 +30,15 @@ import traceback
 import queue
 import akshare as ak
 import pandas as pd
+from datahub import hub as _datahub, safe_ak_call
+
+
+def _ak_data(func, *args, **kwargs):
+    """Return provider data or raise so DataHub keeps stale cache on failure."""
+    result = safe_ak_call(func, *args, **kwargs)
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or "AKShare call failed")
+    return result.get("data")
 import numpy as np
 
 # 文件读写锁（防止并发写入竞争）
@@ -456,7 +465,14 @@ def _fetch_global_futures_price(code: str) -> tuple | None:
     if code.upper() not in GLOBAL_FUTURES_CODES:
         return None
     try:
-        df = ak.futures_foreign_commodity_realtime(symbol=[code.upper()])
+        topic = f"global:quote:{code.upper()}"
+        df = _datahub.request(
+            topic,
+            lambda: _ak_data(ak.futures_foreign_commodity_realtime, symbol=[code.upper()]),
+            ttl=60,
+            min_interval=1,
+            source="akshare.foreign_realtime",
+        )
         if df is None or df.empty:
             return None
         row = df.iloc[0]
@@ -479,8 +495,13 @@ def _fetch_global_futures_price(code: str) -> tuple | None:
 def _get_global_prev_close(code: str) -> tuple[float, float] | tuple[None, None]:
     """获取外盘期货昨收价和涨跌幅（用于涨跌停板判断）"""
     try:
-        suffix = datetime.datetime.now().strftime('%y%m')
-        df = ak.futures_foreign_hist(symbol=code.upper())
+        df = _datahub.request(
+            f"global:history:{code.upper()}",
+            lambda: _ak_data(ak.futures_foreign_hist, symbol=code.upper()),
+            ttl=300,
+            min_interval=5,
+            source="akshare.foreign_hist",
+        )
         if df is None or len(df) < 2:
             return None, None
         closes = pd.to_numeric(df['close'], errors='coerce').dropna()
@@ -509,7 +530,13 @@ def _get_prev_close_and_change(variety, cur_price=None):
         cached = _cache.get_kline(kline_sym)
         df_d = cached[0] if cached else None
         if df_d is None or len(df_d) < 2:
-            df_d = ak.futures_zh_daily_sina(symbol=kline_sym)
+            df_d = _datahub.request(
+                f"kline:{kline_sym}:1d",
+                lambda: _ak_data(ak.futures_zh_daily_sina, symbol=kline_sym),
+                ttl=300,
+                min_interval=3,
+                source="akshare.zh_daily_sina",
+            )
             if df_d is not None and len(df_d) > 20:
                 try:
                     df_w_raw = df_d.copy()
@@ -3177,6 +3204,14 @@ def api_backtest():
         "strategy": strategy
     })
 
+@app.route('/api/datahub/meta', methods=['GET'])
+def api_datahub_meta():
+    """诊断DataHub topic缓存状态：/api/datahub/meta?topic=quote:TA2609"""
+    topic = request.args.get('topic', '').strip()
+    if not topic:
+        return jsonify({"error": "missing topic"}), 400
+    return jsonify(_datahub.meta(topic))
+
 @app.route('/api/correlation', methods=['GET'])
 def api_correlation():
     """相关性热力图：GET /api/correlation?varieties=TA,RU,RB&lookback=60"""
@@ -3210,11 +3245,23 @@ def chart_data(variety):
         try:
             # ── 全球期货用外盘历史数据 ──
             if prefix.upper() in GLOBAL_FUTURES_CODES:
-                df_d = ak.futures_foreign_hist(symbol=prefix.upper())
+                df_d = _datahub.request(
+                    f"global:history:{prefix.upper()}",
+                    lambda: _ak_data(ak.futures_foreign_hist, symbol=prefix.upper()),
+                    ttl=300,
+                    min_interval=5,
+                    source="akshare.foreign_hist",
+                )
                 df_w_raw = df_d.copy()
             else:
-                df_d = ak.futures_zh_daily_sina(symbol=sym)
-                df_w_raw = ak.futures_zh_daily_sina(symbol=sym)  # 周线用同一品种日线重采样
+                df_d = _datahub.request(
+                    f"kline:{sym}:1d",
+                    lambda: _ak_data(ak.futures_zh_daily_sina, symbol=sym),
+                    ttl=300,
+                    min_interval=3,
+                    source="akshare.zh_daily_sina",
+                )
+                df_w_raw = df_d.copy()  # 周线用同一品种日线重采样
             df_w_raw['date'] = pd.to_datetime(df_w_raw['date'], errors='coerce')
             df_w_raw = df_w_raw.set_index('date').sort_index()
             df_w = df_w_raw.resample('W').agg({'high': 'max', 'low': 'min', 'close': 'last'})
