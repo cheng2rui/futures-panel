@@ -1,4 +1,4 @@
-# 版本: v0.7.0（2026-05-03）全球期货扩展 + 相关性热力图
+# 版本: v0.8.1（2026-05-03）
 # 升级: 真实保证金率表(MARGIN_RATE) + 按品种手续费(COMMISSION) + 涨跌停板限制(PRICE_LIMIT)
 #       新增 api/trade/check 开仓前风控端点
 #       持仓展示增加 margin_rate / commission_total 字段
@@ -3208,8 +3208,13 @@ def chart_data(variety):
         df_d, df_w = cached
     else:
         try:
-            df_d = ak.futures_zh_daily_sina(symbol=sym)
-            df_w_raw = ak.futures_zh_daily_sina(symbol=sym)
+            # ── 全球期货用外盘历史数据 ──
+            if prefix.upper() in GLOBAL_FUTURES_CODES:
+                df_d = ak.futures_foreign_hist(symbol=prefix.upper())
+                df_w_raw = df_d.copy()
+            else:
+                df_d = ak.futures_zh_daily_sina(symbol=sym)
+                df_w_raw = ak.futures_zh_daily_sina(symbol=sym)  # 周线用同一品种日线重采样
             df_w_raw['date'] = pd.to_datetime(df_w_raw['date'], errors='coerce')
             df_w_raw = df_w_raw.set_index('date').sort_index()
             df_w = df_w_raw.resample('W').agg({'high': 'max', 'low': 'min', 'close': 'last'})
