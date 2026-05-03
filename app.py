@@ -1,10 +1,13 @@
-# 版本: v0.3.3（2026-04-23）
-# 优化: 扫市场提速（price+SR并行fetch，并发超时15s→10s）
+# 版本: v0.4.0（2026-05-03）
+# 升级: 真实保证金率表(MARGIN_RATE) + 按品种手续费(COMMISSION) + 涨跌停板限制(PRICE_LIMIT)
+#       新增 api/trade/check 开仓前风控端点
+#       持仓展示增加 margin_rate / commission_total 字段
 #       扫市场卡片信息化（方向色边条/方向标签/主次理由分层/RR数值展示）
 #       新增 best_side/best_reason 字段，前端返回 cache_age
 # ─────────────────────────────────────────────
 import json
 import os
+_BASE = os.environ.get('APP_BASE', '/app')
 import time
 import subprocess
 import signal
@@ -20,7 +23,7 @@ def _get_with_timeout(self, url, **kw):
     return _old_get(self, url, **kw)
 def _post_with_timeout(self, url, **kw):
     kw.setdefault('timeout', (5, 15))
-    return _post_with_timeout(self, url, **kw)
+    return _old_post(self, url, **kw)
 _requests.Session.get = _get_with_timeout
 _requests.Session.post = _post_with_timeout
 import traceback
@@ -36,6 +39,8 @@ _candidates_lock = threading.Lock()
 # 候选池内存存储 {variety: {variety, name, best_side, best_reason, current_price, added_at, source}}
 _candidates = {}
 from flask import Flask, request, jsonify, render_template
+# AI决策模块（借鉴 stock_analysis 决策仪表盘）
+from ai_decision import generate_decision_dashboard, generate_market_overview, generate_ai_enhanced_decision
 from flask_cors import CORS
 
 # ─────────────────────────────────────────────
@@ -619,8 +624,8 @@ _watchlist_thread = threading.Thread(target=_watchlist_broadcaster, daemon=True)
 _watchlist_thread.start()
 
 app = Flask(__name__,
-            template_folder='/app/templates',
-            static_folder='/app/static')
+            template_folder=os.path.join(_BASE, 'templates'),
+            static_folder=os.path.join(_BASE, 'static'))
 CORS(app)
 
 # Flask 500 错误统一处理（打印堆栈方便调试）
@@ -634,7 +639,7 @@ INACTIVE_CONTRACTS = {'PS', 'TL', 'BR'}
 _market_cache = CircuitBreakerCache(ttl_price=60, ttl_market=60, ttl_kline=300)
 
 # ── 账户资金配置 ─────────────────────────────────────────
-ACCOUNT_FILE = '/app/account.json'
+ACCOUNT_FILE = os.path.join(_BASE, 'account.json')
 _ACCOUNT_LOCK = threading.Lock()
 
 def _load_account():
@@ -737,7 +742,7 @@ def _ensure_broadcaster():
 
 def get_realtime_price(variety):
     # 先查缓存
-    price, name, cached_at = _cache.get_price(variety)
+    price, unit, name = _cache.get_price(variety)
     if price is not None:
         stale_info = _cache.get_stale_info(variety)
         return price, name, cached_at, stale_info
@@ -750,9 +755,9 @@ def get_realtime_price(variety):
         return price, unit, name, stale_info
     return None, None, None, {"is_stale": False, "stale_age": None, "breaker_state": "closed"}
 
-POSITIONS_FILE = '/app/positions.json'
-WATCHLIST_FILE = '/app/watchlist.json'
-TRADES_FILE   = '/app/trades.json'
+POSITIONS_FILE = os.path.join(_BASE, 'positions.json')
+WATCHLIST_FILE = os.path.join(_BASE, 'watchlist.json')
+TRADES_FILE   = os.path.join(_BASE, 'trades.json')
 
 if not os.path.exists(POSITIONS_FILE):
     with open(POSITIONS_FILE, 'w') as f:
@@ -948,7 +953,142 @@ POINT_VALUE = {
     "TL": 10000,"TF": 10000,"T": 10000, "TS": 20000,
 }
 
+# ─────────────────────────────────────────────
+# MARGIN_RATE：各品种保证金率（期货公司通常在交易所标准上加 2-3%）
+# key =品种代码 prefix，value = 保证金率（小数，如 0.08 = 8%）
+# 来源：各交易所公告 + 期货公司惯例，参考 Vibe-Trading china_futures.py
+# ─────────────────────────────────────────────
+MARGIN_RATE = {
+    # 中金所（stock index）
+    "IF": 0.12, "IC": 0.12, "IH": 0.12, "IM": 0.12,
+    # 中金所（treasury）
+    "T": 0.03,  "TF": 0.02, "TS": 0.015, "TL": 0.035,
+    # SHFE 金属
+    "AU": 0.08, "AG": 0.09, "CU": 0.08, "AL": 0.07,
+    "ZN": 0.08, "PB": 0.08, "NI": 0.12,  "SN": 0.10, "SS": 0.08,
+    # SHFE 黑色/能化
+    "RB": 0.10, "HC": 0.10, "RU": 0.10, "FU": 0.10,
+    "BU": 0.10, "LU": 0.10, "SC": 0.10, "NR": 0.10,
+    "AU": 0.08, "AG": 0.09,
+    # DCE 黑色
+    "I": 0.12,  "J": 0.12,  "JM": 0.12,
+    # DCE 农产品/化工
+    "C": 0.07,  "CS": 0.07, "M": 0.08,  "Y": 0.08,
+    "A": 0.08,  "B": 0.08,  "P": 0.08,  "JD": 0.08,
+    "L": 0.07,  "V": 0.07,  "PP": 0.07, "EG": 0.08,
+    "EB": 0.08, "PG": 0.08, "LH": 0.12,
+    # CZCE
+    "CF": 0.07, "SR": 0.07, "TA": 0.07, "MA": 0.07,
+    "RM": 0.07, "OI": 0.07, "AP": 0.08, "CY": 0.07,
+    "PK": 0.07, "FG": 0.07, "SA": 0.08, "UR": 0.08,
+    "SF": 0.07, "SM": 0.07,
+    # GFEX
+    "SI": 0.10, "LC": 0.10,
+}
 
+# ─────────────────────────────────────────────
+# COMMISSION：各品种手续费（元/手 或 (mode, rate)）
+# mode="fixed"：固定金额（元/手，开仓+平仓各收一次）
+# mode="rate"：按成交额比例（万分之...）
+# 来源：期货公司官网，参考 Vibe-Trading china_futures.py + 实盘经验
+# ─────────────────────────────────────────────
+# 结构: (mode, value)  fixed=元/手  rate=万分之...
+COMMISSION = {
+    # 中金所（按成交额比例）
+    "IF": ("rate", 0.000023), "IC": ("rate", 0.000023),
+    "IH": ("rate", 0.000023), "IM": ("rate", 0.000023),
+    # 中金所（国债，固定）
+    "T":  ("fixed", 3.0), "TF": ("fixed", 3.0), "TS": ("fixed", 3.0),
+    # SHFE 金属（固定）
+    "AU": ("fixed", 10.0), "AG": ("fixed", 3.0), "CU": ("fixed", 5.0),
+    "AL": ("fixed", 3.0), "ZN": ("fixed", 3.0), "NI": ("fixed", 3.0),
+    "SN": ("fixed", 3.0), "SS": ("fixed", 3.0),
+    # SHFE 黑色（螺纹/热卷按成交额比例，其余固定）
+    "RB": ("rate", 0.0001), "HC": ("rate", 0.0001),
+    "I":  ("rate", 0.0001), "J":  ("rate", 0.0001), "JM": ("rate", 0.0001),
+    # SHFE 能化
+    "SC": ("fixed", 20.0), "FU": ("rate", 0.00005),
+    "BU": ("rate", 0.0001), "LU": ("fixed", 2.0),
+    "RU": ("fixed", 3.0),
+    # DCE 农产品/化工（固定）
+    "C":  ("fixed", 1.2), "CS": ("fixed", 1.5), "M":  ("fixed", 1.5),
+    "Y":  ("fixed", 2.5), "A":  ("fixed", 2.0), "P":  ("fixed", 2.5),
+    "JD": ("rate", 0.00015), "LH": ("rate", 0.0002),
+    "L":  ("fixed", 1.0), "V":  ("fixed", 1.0), "PP": ("fixed", 1.0),
+    "EG": ("fixed", 3.0), "EB": ("fixed", 3.0), "PG": ("fixed", 3.0),
+    # CZCE（固定）
+    "CF": ("fixed", 4.3), "SR": ("fixed", 3.0), "TA": ("fixed", 3.0),
+    "MA": ("fixed", 2.0), "RM": ("fixed", 1.5), "OI": ("fixed", 2.0),
+    "AP": ("fixed", 5.0), "UR": ("fixed", 3.0),
+    "FG": ("fixed", 3.0), "SA": ("fixed", 3.5),
+    "SF": ("fixed", 3.0), "SM": ("fixed", 3.0),
+    "PK": ("fixed", 1.5),
+    # GFEX
+    "SI": ("fixed", 5.0), "LC": ("fixed", 1.0),
+}
+_DEFAULT_COMMISSION = ("fixed", 5.0)  # 兜底默认
+
+# ─────────────────────────────────────────────
+# PRICE_LIMIT：各品种涨跌停板幅度（小数，如 0.05 = ±5%）
+# 默认 5%（大多数商品），股指10%，国债2-3.5%
+# ─────────────────────────────────────────────
+PRICE_LIMIT = {
+    "IF": 0.10, "IC": 0.10, "IH": 0.10, "IM": 0.10,   # 股指 ±10%
+    "T": 0.035, "TF": 0.020, "TS": 0.015, "TL": 0.035,  # 国债
+}
+_DEFAULT_PRICE_LIMIT = 0.05  # 商品默认 ±5%
+
+
+def get_margin_rate(variety: str) -> float:
+    """获取品种保证金率，默认10%"""
+    prefix = "".join(filter(str.isalpha, variety)).upper()
+    return MARGIN_RATE.get(prefix, 0.10)
+
+
+def calc_commission(variety: str, price: float, quantity: int = 1, is_open: bool = True) -> float:
+    """
+    计算单边手续费（元）。
+    固定手续费按手数收；比例手续费 = 手数 × 成交额 × 比例
+    开仓+平仓各算一次，故最终手续费 = 单边 × 2（外部调用方负责×2）
+    """
+    prefix = "".join(filter(str.isalpha, variety)).upper()
+    pv = POINT_VALUE.get(prefix, 1)
+    mode, value = COMMISSION.get(prefix, _DEFAULT_COMMISSION)
+    if mode == "rate":
+        # rate = 成交额 × value（如 0.0001 = 万分之一）
+        # 成交额 = price × quantity × point_value
+        notional = price * quantity * pv
+        return notional * value
+    else:
+        return quantity * value
+
+
+def can_trade_at_price(variety: str, direction: int, current_price: float, pre_close: float, limit_up_only=False) -> tuple[bool, str]:
+    """
+    检查涨跌停板限制。
+    direction: 1=开多/平空, -1=开空/平多, 0=只平仓
+    limit_up_only: 是否只允许买（用于涨停板只允许平多不允许开空）
+    返回 (can_trade, reason)
+    """
+    if pre_close <= 0 or current_price <= 0:
+        return True, ""
+
+    prefix = "".join(filter(str.isalpha, variety)).upper()
+    limit = PRICE_LIMIT.get(prefix, _DEFAULT_PRICE_LIMIT)
+    pct_chg = (current_price - pre_close) / pre_close
+
+    if direction == 1:  # 开多
+        if pct_chg >= limit - 0.001:
+            return False, f"涨停板限制，禁止开多（+{pct_chg*100:.1f}%，限{limit*100:.1f}%）"
+    elif direction == -1:  # 开空
+        if pct_chg <= -(limit - 0.001):
+            return False, f"跌停板限制，禁止开空（{pct_chg*100:.1f}%，限-{limit*100:.1f}%）"
+    elif direction == 0:  # 平仓
+        if pct_chg <= -(limit - 0.001):
+            return False, f"跌停板限制，禁止平多（{pct_chg*100:.1f}%，限-{limit*100:.1f}%）"
+        if pct_chg >= limit - 0.001:
+            return False, f"涨停板限制，禁止平空（+{pct_chg*100:.1f}%，限+{limit*100:.1f}%）"
+    return True, ""
 
 def calc_kdj(df, n=9, m1=3, m2=3):
     try:
@@ -1731,9 +1871,10 @@ def check_alerts():
         cur = (_price_cache.get(p.get('variety', ''), (0, None, None))[0] or 0)
         prefix_key = "".join(filter(str.isalpha, p.get('variety', ''))).upper()
         pv = POINT_VALUE.get(prefix_key, 1)
-        return cur * pv * p.get('quantity', 1)
+        margin_rate = MARGIN_RATE.get(prefix_key, 0.10)  # 各品种真实保证金率
+        return cur * pv * p.get('quantity', 1) * margin_rate  # 保证金 = 名义值 × 保证金率
 
-    total_exposed = sum(_exposed_one(p) for p in positions)
+    total_margin = sum(_exposed_one(p) for p in positions)  # 真实保证金占用
     total_pnl_for_equity = 0
     for p in positions:
         cur = (_price_cache.get(p.get('variety', ''), (0, None, None))[0] or 0)
@@ -1746,11 +1887,7 @@ def check_alerts():
             else:
                 total_pnl_for_equity += (entry - cur) * pv * qty
     current_equity = total_bal + total_pnl_for_equity
-    margin_util = (total_exposed / current_equity) * 100 if current_equity > 0 else 0
-    if margin_util > 1000:
-        # 权益接近零时杠杆率会暴表（如浮亏导致权益≈0），
-        # 此时用名义本金×10%保证金率估算，避免显示99999%的荒谬数字
-        margin_util = (total_exposed * 0.10 / current_equity * 100) if current_equity > 0 else 0
+    margin_util = (total_margin / current_equity) * 100 if current_equity > 0 else 0
     if alerts.get('leverage_warning', True) and margin_util > threshold:
         fired.append({"type": "LEVERAGE_ALERT", "margin_util_pct": round(margin_util, 1), "threshold": threshold, "level": "warning"})
 
@@ -1770,6 +1907,25 @@ def check_alerts():
                 fired.append({"type": "SL_HIT", "variety": pos['variety'], "price": cur_price, "level": "danger"})
             elif direction == 'short' and cur_price >= resistance:
                 fired.append({"type": "SL_HIT", "variety": pos['variety'], "price": cur_price, "level": "danger"})
+
+        # ── 涨跌停板预警 ──
+        prefix_sym = "".join(filter(str.isalpha, pos.get('variety', ''))).upper()
+        limit = PRICE_LIMIT.get(prefix_sym, _DEFAULT_PRICE_LIMIT)
+        # 获取昨收价（从缓存或行情）
+        pre_close_info = _get_prev_close_and_change(pos.get('variety', ''), cur_price)
+        pre_close = pre_close_info[0]
+        if pre_close and pre_close > 0 and alerts.get('leverage_warning', True):
+            pct_chg = (cur_price - pre_close) / pre_close
+            limit_up = limit - 0.001
+            limit_down = -(limit - 0.001)
+            if pct_chg >= limit_up:
+                fired.append({"type": "LIMIT_UP", "variety": pos['variety'],
+                    "pct_chg": round(pct_chg * 100, 2), "limit_pct": round(limit * 100, 1),
+                    "message": f"涨停板（+{round(pct_chg*100,2)}%，限+{round(limit*100,1)}%）", "level": "warning"})
+            elif pct_chg <= limit_down:
+                fired.append({"type": "LIMIT_DOWN", "variety": pos['variety'],
+                    "pct_chg": round(pct_chg * 100, 2), "limit_pct": round(limit * 100, 1),
+                    "message": f"跌停板（{round(pct_chg*100,2)}%，限-{round(limit*100,1)}%）", "level": "danger"})
         suffix = "".join(filter(str.isdigit, pos.get('variety', '')))
         if len(suffix) == 4 and alerts.get('expiry_warning'):
             prefix_sym = "".join(filter(str.isalpha, pos.get('variety', ''))).upper()
@@ -1829,8 +1985,12 @@ def handle_positions():
             cur_price, _, name, stale_info = get_realtime_price(pos.get('variety', ''))
             pnl = None
             if cur_price:
-                pnl = (((cur_price - entry) * pv * qty) - (FEE_PER_LOT * qty) if direction == 'long'
-                       else ((entry - cur_price) * pv * qty) - (FEE_PER_LOT * qty))
+                # 真实手续费（开仓+平仓各一次）
+                open_comm = calc_commission(pos.get('variety',''), entry, int(qty), is_open=True)
+                close_comm = calc_commission(pos.get('variety',''), cur_price, int(qty), is_open=False)
+                total_comm = open_comm + close_comm
+                pnl = (((cur_price - entry) * pv * qty) if direction == 'long'
+                       else ((entry - cur_price) * pv * qty)) - total_comm
 
             sr = calc_sr_multi_period(pos.get('variety', ''))
             (support, resistance, k_val, d_val, j_val, atr_val,
@@ -1898,6 +2058,10 @@ def handle_positions():
                         prev_trail = pos.get('trail_price')
                         trail_price = min(prev_trail or 999999, new_trail) if prev_trail else new_trail
 
+            # 各品种真实保证金率（用于风控显示）
+            pos_prefix = "".join(filter(str.isalpha, pos.get('variety', '')))
+            pos_margin_rate = MARGIN_RATE.get(pos_prefix, 0.10)
+
             out = dict(pos)
             prev_close, change_pct = _get_prev_close_and_change(pos.get('variety', ''), cur_price)
             out.update({
@@ -1925,6 +2089,10 @@ def handle_positions():
                 'entry_prompt_long': entry_prompt_long,
                 'entry_prompt_short': entry_prompt_short,
                 'stale': stale_info,
+                # 真实保证金率（来自 MARGIN_RATE 表）
+                'margin_rate': pos_margin_rate,
+                # 手续费（开仓+平仓单边合计）
+                'commission_total': round(total_comm, 0) if cur_price else None,
             })
             # 动态仓位建议（海龟法则 ATR）
             if atr_val and atr_val > 0 and pv:
@@ -1938,22 +2106,21 @@ def handle_positions():
         total_pnl = sum(r.get('pnl', 0) or 0 for r in result)
         acct = _load_account()
         total_balance = acct.get('total_balance', 1_000_000)
-        # 计算名义值（用于保证金估算）
-        total_exposed = 0
+        # 计算真实保证金占用（各品种保证金率不同）
+        total_margin = 0.0
         for pos in positions:
             prefix = "".join(filter(str.isalpha, pos.get('variety', '')))
             pv = POINT_VALUE.get(prefix, 1)
+            margin_rate = MARGIN_RATE.get(prefix, 0.10)  # 各品种真实保证金率
             cur_price, *_ = get_realtime_price(pos.get('variety', ''))
             if cur_price:
-                total_exposed += cur_price * pv * float(pos.get('quantity', 1))
+                notional = cur_price * pv * float(pos.get('quantity', 1))
+                total_margin += notional * margin_rate  # 保证金 = 名义值 × 保证金率
         # 当前权益 = 余额 + 浮动盈亏
         current_equity = total_balance + total_pnl
-        # 估算保证金占用（名义值 × 10%，各品种大约需要 5%~15% 的名义值作为保证金）
-        MARGIN_RATIO = 0.10
-        margin_used = total_exposed * MARGIN_RATIO
-        available_balance = max(0, current_equity - margin_used)
-        margin_util_pct = (margin_used / current_equity * 100) if current_equity > 0 else 0
-        leverage = (total_exposed / current_equity) if current_equity > 0 else 0
+        available_balance = max(0, current_equity - total_margin)
+        margin_util_pct = (total_margin / current_equity * 100) if current_equity > 0 else 0
+        leverage = (total_margin / current_equity) if current_equity > 0 else 0
         account_obj = {
             "total_balance": total_balance,
             "available_balance": round(available_balance, 0),
@@ -1999,6 +2166,94 @@ def delete_position(index):
     if target_variety:
         threading.Thread(target=lambda: _cache.invalidate(target_variety), daemon=True).start()
     return jsonify({"message": "已删除"})
+
+@app.route('/api/trade/check', methods=['POST'])
+def check_trade():
+    """开仓前风控检查：涨跌停板 + 保证金占用 + 风险等级"""
+    data = request.json or {}
+    variety = data.get('variety', '').strip().upper()
+    direction = data.get('direction', 'long')
+    entry_price = float(data.get('entry_price', 0))
+    quantity = int(data.get('quantity', 1))
+    if not variety or entry_price <= 0 or quantity <= 0:
+        return jsonify({"error": "参数不完整"}), 400
+
+    prefix = "".join(filter(str.isalpha, variety))
+    pv = POINT_VALUE.get(prefix, 1)
+    margin_rate = MARGIN_RATE.get(prefix, 0.10)
+    limit = PRICE_LIMIT.get(prefix, _DEFAULT_PRICE_LIMIT)
+    limit_pct = round(limit * 100, 1)
+
+    cur_price, _, name, _ = get_realtime_price(variety)
+    pre_close, change_pct = _get_prev_close_and_change(variety, cur_price or entry_price)
+
+    warnings = []
+    blocked = False
+    block_reason = ""
+
+    # 涨跌停板检查
+    if cur_price and pre_close and pre_close > 0:
+        dir_int = 1 if direction == 'long' else -1
+        can_trade, reason = can_trade_at_price(variety, dir_int, cur_price, pre_close)
+        if not can_trade:
+            blocked = True
+            block_reason = reason
+        else:
+            pct_chg = (cur_price - pre_close) / pre_close
+            limit_up = limit - 0.001
+            limit_down = -(limit - 0.001)
+            if pct_chg >= limit_up:
+                warnings.append(f"接近涨停板（+{round(pct_chg*100,2)}%）")
+            elif pct_chg <= limit_down:
+                warnings.append(f"接近跌停板（{round(pct_chg*100,2)}%）")
+
+    # 预估保证金占用
+    notional = entry_price * pv * quantity
+    est_margin = notional * margin_rate
+    acct = _load_account()
+    equity = acct.get('total_balance', 1_000_000)
+    existing_margin = 0.0
+    positions = load_positions()
+    for p in positions:
+        pp = "".join(filter(str.isalpha, p.get('variety', ''))).upper()
+        ppv = POINT_VALUE.get(pp, 1)
+        pmr = MARGIN_RATE.get(pp, 0.10)
+        cp, *_ = get_realtime_price(p.get('variety', ''))
+        if cp:
+            existing_margin += cp * ppv * p.get('quantity', 1) * pmr
+    total_after = existing_margin + est_margin
+    margin_util = (total_after / equity * 100) if equity > 0 else 0
+
+    if margin_util > 100:
+        blocked = True
+        block_reason = f"保证金不足（预估总占用 {round(total_after/10000,1)}万，保证金率 {round(margin_util,1)}%）"
+    elif margin_util > 80:
+        warnings.append(f"保证金占用较高（{round(margin_util,1)}%）")
+
+    # 手续费预估
+    open_comm = calc_commission(variety, entry_price, quantity, is_open=True)
+    close_comm = calc_commission(variety, entry_price, quantity, is_open=False)
+
+    return jsonify({
+        "variety": variety,
+        "name": name,
+        "direction": direction,
+        "entry_price": entry_price,
+        "quantity": quantity,
+        "point_value": pv,
+        "margin_rate": margin_rate,
+        "est_margin": round(est_margin, 0),
+        "margin_util_after": round(margin_util, 1),
+        "limit_pct": limit_pct,
+        "commission_total": round(open_comm + close_comm, 0),
+        "current_price": cur_price,
+        "preclose": pre_close,
+        "change_pct": change_pct,
+        "warnings": warnings,
+        "blocked": blocked,
+        "block_reason": block_reason,
+    })
+
 
 # ── 多周期共振 ─────────────────────────────────────────
 @app.route('/api/resonance/<variety>', methods=['GET'])
@@ -2957,7 +3212,72 @@ def market_events():
     return jsonify({'events': events, 'upcoming_count': len(events)})
 
 
+
+
+# ── AI决策仪表盘（借鉴 ZhuLinsen/daily_stock_analysis）─────────────────
+@app.route('/api/decision', methods=['GET'])
+def api_decision():
+    """AI决策仪表盘：持仓评分 + 风险警报 + 操作建议"""
+    positions = load_positions()
+    watchlist = load_watchlist()
+
+    def quote_fn(variety):
+        try:
+            result = get_realtime_price(variety)
+            if not result or result[0] is None: return None
+            price, unit, name, stale_info = result
+            return {'price': price, 'unit': unit, 'name': name}
+        except: return None
+
+    dashboard = generate_decision_dashboard(positions, watchlist, quote_fn)
+    return jsonify({'text': dashboard})
+
+
+@app.route('/api/market_overview', methods=['GET'])
+def api_market_overview():
+    """市场概览：板块强弱 + 资金流向 + 情绪"""
+    watchlist = load_watchlist()
+    quotes = {}
+    for w in watchlist:
+        v = w.get('variety') if isinstance(w, dict) else str(w)
+        if not v: continue
+        try:
+            result = get_realtime_price(v)
+            if result and result[0] is not None:
+                price, unit, name, stale_info = result
+                quotes[v] = {'price': price, 'name': name, 'change_pct': 0, 'oi_change': 0}
+        except: pass
+        if len(quotes) >= 10: break
+
+    overview = generate_market_overview(quotes)
+    return jsonify({'text': overview})
+
+
+@app.route('/api/ai_decision', methods=['GET'])
+def api_ai_decision():
+    """MiniMax VL 驱动的AI增强决策"""
+    positions = load_positions()
+    if not positions:
+        return jsonify({'text': '📊 AI决策\n暂无持仓数据'})
+
+    def quote_fn(variety):
+        try:
+            result = get_realtime_price(variety)
+            if not result or result[0] is None: return None
+            price, unit, name, stale_info = result
+            return {'price': price, 'unit': unit, 'name': name}
+        except: return None
+
+    pos_data = {}
+    for p in positions:
+        v = p.get('variety')
+        if v: pos_data[v] = p
+
+    result = generate_ai_enhanced_decision(pos_data, quote_fn)
+    return jsonify({'text': result})
+
+
 if __name__ == '__main__':
     # 启动时后台预热持仓日线（避免首次访问卡顿）
     _warm_klines_for_positions()
-    app.run(host='0.0.0.0', port=8318)
+    app.run(host='0.0.0.0', port=8318, threaded=True)
