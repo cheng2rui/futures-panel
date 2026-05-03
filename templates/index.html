@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>期货风控监控</title>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
   <link rel="stylesheet" href="/static/gridstack.min.css">
   <script src="/static/gridstack.min.js"></script>
   <link rel="icon" type="image/png" href="/static/favicon.png">
@@ -1385,6 +1386,32 @@
       </div>
     </div>
 
+    <!-- 相关性热力图 Widget -->
+    <div id="correlation-widget" class="grid-stack-item gs-widget" gs-id="correlation" gs-x="0" gs-y="10" gs-w="12" gs-h="5" gs-min-w="6" gs-max-h="10">
+      <div class="grid-stack-item-content" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:0;display:flex;flex-direction:column">
+        <div class="widget-drag-handle">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          相关性热力图
+          <div class="widget-drag-dots">
+            <span></span><span></span><span></span>
+            <span></span><span></span><span></span>
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+        <div style="padding:10px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface-2);border-bottom:1px solid var(--border)">
+          <input type="text" id="corrVarieties" placeholder="如 TA,RU,RB,CL,GC（逗号分隔，默认自选）" style="flex:1;min-width:160px;padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:0.8rem;font-family:inherit">
+          <select id="corrLookback" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:0.8rem">
+            <option value="30">30日</option>
+            <option value="60" selected>60日</option>
+            <option value="120">120日</option>
+            <option value="252">1年</option>
+          </select>
+          <button onclick="loadCorrelationHeatmap()" style="padding:5px 14px;background:var(--blue);border:none;color:#fff;border-radius:6px;font-size:0.8rem;cursor:pointer;font-weight:600">🔍 分析</button>
+        </div>
+        <div id="correlationChart" style="flex:1;min-height:0;padding:8px 14px 10px"></div>
+      </div>
+    </div>
+
   </div>
 
   </div>
@@ -2443,6 +2470,101 @@
       });
     } else if (typeof loadMarketEventsWidget === 'function') {
       loadMarketEventsWidget(3).catch(() => {});
+    }
+  }
+
+  // ── 相关性热力图 v0.7.0 ───────────────────────────────────
+  let _corrChart = null;
+
+  async function loadCorrelationHeatmap() {
+    const container = document.getElementById('correlationChart');
+    if (!container) return;
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:0.82rem;text-align:center;padding:30px">加载中...</div>';
+
+    const varietiesInput = document.getElementById('corrVarieties');
+    const lookback = parseInt(document.getElementById('corrLookback')?.value || 60);
+    let url = `${API}/api/correlation?lookback=${lookback}`;
+    if (varietiesInput && varietiesInput.value.trim()) {
+      url += `&varieties=${encodeURIComponent(varietiesInput.value.trim())}`;
+    }
+
+    try {
+      const r = await fetch(url);
+      const data = await r.json();
+      if (data.error && !data.labels?.length) {
+        container.innerHTML = `<div style="color:var(--text-dim);font-size:0.82rem;text-align:center;padding:30px">${data.error}</div>`;
+        return;
+      }
+      const { labels, heatmap, data_points } = data;
+      if (!labels || labels.length < 2) {
+        container.innerHTML = '<div style="color:var(--text-dim);font-size:0.82rem;text-align:center;padding:30px">至少需要2个品种</div>';
+        return;
+      }
+
+      // 初始化 ECharts 实例
+      if (!_corrChart) {
+        _corrChart = echarts.init(container);
+      } else {
+        _corrChart.dispose();
+        _corrChart = echarts.init(container);
+      }
+
+      const option = {
+        backgroundColor: 'transparent',
+        tooltip: {
+          position: 'top',
+          formatter: function(p) {
+            const r = labels[p.data[1]];
+            const c = labels[p.data[0]];
+            const v = p.data[2];
+            const color = v > 0 ? '#ef4444' : '#22c55e';
+            const corrType = v > 0.6 ? '强正相关' : (v < -0.6 ? '强负相关' : (v > 0.3 ? '正相关' : (v < -0.3 ? '负相关' : '弱相关')));
+            return `<div style="font-size:0.78rem;padding:4px 8px">
+              <b>${r} × ${c}</b><br>
+              <span style="color:${color};font-weight:700;font-size:1rem">${(v*100).toFixed(1)}%</span><br>
+              <span style="color:#9ca3af;font-size:0.72rem">${corrType}</span>
+            </div>`;
+          }
+        },
+        grid: { left: 60, right: 20, top: 10, bottom: 40 },
+        xAxis: { type: 'category', data: labels, splitArea: { show: true }, axisLabel: { fontSize: 10, color: 'var(--text-dim)', rotate: 30 }, axisLine: { lineStyle: { color: 'var(--border)' } } },
+        yAxis: { type: 'category', data: labels, splitArea: { show: true }, axisLabel: { fontSize: 10, color: 'var(--text-dim)' }, axisLine: { lineStyle: { color: 'var(--border)' } } },
+        visualMap: {
+          min: -1, max: 1,
+          calculable: true,
+          orient: 'horizontal',
+          left: 'center',
+          bottom: 0,
+          inRange: {
+            color: ['#22c55e', '#86efac', '#fafafa', '#fca5a5', '#ef4444']
+          },
+          textStyle: { fontSize: 10, color: 'var(--text-dim)' },
+          formatter: v => (v > 0 ? '+' : '') + (v * 100).toFixed(0) + '%'
+        },
+        series: [{
+          name: '相关性',
+          type: 'heatmap',
+          data: heatmap,
+          label: { show: true, fontSize: 9, color: '#374151', formatter: p => (p.data[2] * 100).toFixed(0) + '' },
+          itemStyle: { borderColor: 'var(--surface)', borderWidth: 2 },
+          emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.3)' } }
+        }]
+      };
+
+      _corrChart.setOption(option);
+
+      // 窗口resize时自动重绘
+      window.addEventListener('resize', () => _corrChart?.resize());
+
+      // 显示数据点信息
+      const info = document.createElement('div');
+      info.style.cssText = 'position:absolute;bottom:44px;right:10px;font-size:0.7rem;color:var(--text-dim)';
+      info.textContent = `${data_points}个数据点 / ${lookback}日窗口 / ${labels.length}个品种`;
+      container.style.position = 'relative';
+      container.appendChild(info);
+
+    } catch(e) {
+      container.innerHTML = `<div style="color:#ef4444;font-size:0.82rem;text-align:center;padding:30px">加载失败: ${e.message}</div>`;
     }
   }
 

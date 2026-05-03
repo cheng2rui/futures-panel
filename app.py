@@ -1,4 +1,4 @@
-# 版本: v0.4.0（2026-05-03）
+# 版本: v0.7.0（2026-05-03）全球期货扩展 + 相关性热力图
 # 升级: 真实保证金率表(MARGIN_RATE) + 按品种手续费(COMMISSION) + 涨跌停板限制(PRICE_LIMIT)
 #       新增 api/trade/check 开仓前风控端点
 #       持仓展示增加 margin_rate / commission_total 字段
@@ -447,6 +447,52 @@ def _fetch_price_from_sina_direct(variety: str, prefix: str, suffix: str, meta) 
         # print(f"Sina direct fallback 失败 {variety}: {e}")  # 太吵，注释掉
         return None
 
+def _fetch_global_futures_price(code: str) -> tuple | None:
+    """
+    获取外盘期货实时行情（已转换为人民币）。
+    code: GLOBAL_FUTURES_META 中的品种代码，如 'CL', 'GC', 'NG' 等
+    返回: (price, exchange, name) 或 None
+    """
+    if code.upper() not in GLOBAL_FUTURES_CODES:
+        return None
+    try:
+        df = ak.futures_foreign_commodity_realtime(symbol=[code.upper()])
+        if df is None or df.empty:
+            return None
+        row = df.iloc[0]
+        # 优先用人民币报价（如已由akshare转换的布伦特/黄金/白银）
+        cny_price = row.get('人民币报价')
+        if cny_price and float(cny_price) > 0:
+            price = float(cny_price)
+        else:
+            price = float(row.get('最新价', 0))
+        if price <= 0:
+            return None
+        exchange = GLOBAL_FUTURES_META.get(code.upper(), ('', '', code.upper(), '', ''))[2]
+        name = str(row.get('名称', ''))
+        # 统一保留2位精度
+        price = round(price, 2)
+        return (price, exchange, name)
+    except Exception:
+        return None
+
+def _get_global_prev_close(code: str) -> tuple[float, float] | tuple[None, None]:
+    """获取外盘期货昨收价和涨跌幅（用于涨跌停板判断）"""
+    try:
+        suffix = datetime.datetime.now().strftime('%y%m')
+        df = ak.futures_foreign_hist(symbol=code.upper())
+        if df is None or len(df) < 2:
+            return None, None
+        closes = pd.to_numeric(df['close'], errors='coerce').dropna()
+        if len(closes) < 2:
+            return None, None
+        cur = float(closes.iloc[-1])
+        pre = float(closes.iloc[-2])
+        pct = (cur - pre) / pre if pre > 0 else 0
+        return pre, pct
+    except Exception:
+        return None, None
+
 def _get_prev_close_and_change(variety, cur_price=None):
     """返回 (prev_close, change_pct)。优先复用日线缓存，失败时返回 (None, None)。"""
     try:
@@ -740,8 +786,16 @@ def _ensure_broadcaster():
         _broadcaster_thread = threading.Thread(target=_sse_broadcast_safe, daemon=True)
         _broadcaster_thread.start()
 
-def get_realtime_price(variety):
-    # 先查缓存
+def get_realtime_price(variety: str):
+    prefix = "".join(filter(str.isalpha, variety))
+    if prefix.upper() in GLOBAL_FUTURES_CODES:
+        # 外盘期货
+        result = _fetch_global_futures_price(prefix.upper())
+        if result:
+            price, exchange, name = result
+            return price, name, None, {"is_stale": False, "stale_age": None, "breaker_state": "closed", "exchange": exchange}
+        return None, None, None, {"is_stale": False, "stale_age": None, "breaker_state": "closed"}
+    # 国内期货（原有逻辑）
     price, unit, name = _cache.get_price(variety)
     if price is not None:
         stale_info = _cache.get_stale_info(variety)
@@ -872,6 +926,97 @@ VARIETY_META = {
     "T":   ("5年期国债", "T",        "中金所"),       "TS":  ("2年期国债","TS",       "中金所"),
 }
 VARIETY_META_LOWER = {k.lower(): v for k, v in VARIETY_META.items()}
+
+# ─────────────────────────────────────────────
+# 全球期货元数据（GLOBAL_FUTURES_META）
+# key: 品种代码（如 'CL', 'GC', 'NG'）
+# value: (中文名, Sina代码, 交易所, 币种, 合约乘数单位)
+# 币种: CNY=人民币报价（akshare已转换）, USD=美元
+# ─────────────────────────────────────────────
+GLOBAL_FUTURES_META = {
+    # 能源（NYMEX / ICE / CME）
+    "CL":  ("WTI原油",     "NYMEX原油",   "NYMEX",   "CNY",  "美元/桶"),
+    "NG":  ("天然气",       "NYMEX天然气",  "NYMEX",   "CNY",  "美元/百万英热"),
+    "HO":  ("取暖油",       "NYMEX取暖油",  "NYMEX",   "CNY",  "美元/加仑"),
+    "RB":  ("汽油",         "NYMEX汽油",    "NYMEX",   "CNY",  "美元/加仑"),
+    "OIL": ("布伦特原油",   "布伦特原油",   "ICE",     "CNY",  "美元/桶"),
+    # 贵金属（COMEX / LME / 伦敦金）
+    "GC":  ("黄金",         "COMEX黄金",    "COMEX",   "CNY",  "美元/盎司"),
+    "SI":  ("白银",         "COMEX白银",    "COMEX",   "CNY",  "美元/盎司"),
+    "HG":  ("铜",           "COMEX铜",      "COMEX",   "CNY",  "磅/美元"),
+    "XAU": ("伦敦金",       "伦敦金",       "LME",     "CNY",  "美元/盎司"),
+    "XAG": ("伦敦银",       "伦敦银",       "LME",     "CNY",  "美元/盎司"),
+    "XPT": ("伦敦铂金",     "伦敦铂金",     "LME",     "CNY",  "美元/盎司"),
+    # 农产品（CBOT）
+    "C":   ("玉米",         "CBOT-玉米",    "CBOT",    "CNY",  "美分/蒲式耳"),
+    "S":   ("黄豆",         "CBOT-黄豆",    "CBOT",    "CNY",  "美分/蒲式耳"),
+    "W":   ("小麦",         "CBOT-小麦",    "CBOT",    "CNY",  "美分/蒲式耳"),
+    "SM":  ("豆粕",         "CBOT-黄豆粉",  "CBOT",    "CNY",  "磅/美元"),
+    "BO":  ("豆油",         "CBOT-黄豆油",  "CBOT",    "CNY",  "磅/美元"),
+    # 指数（CME）
+    "ES":  ("标普500",      "CME-标普500",  "CME",     "CNY",  "美元/点"),
+    "NQ":  ("纳斯达克100",  "CME-纳斯达克",  "CME",     "CNY",  "美元/点"),
+    "YM":  ("道琼斯",        "CME-道琼斯",   "CME",     "CNY",  "美元/点"),
+    # 软商品/其他（ICE / NYBOT）
+    "CT":  ("棉花",         "NYBOT-棉花",   "NYBOT",   "CNY",  "美分/磅"),
+    "RS":  ("原糖",         "美国原糖",      "NYBOT",   "CNY",  "美分/磅"),
+    "FCPO":("马棕油",       "马棕油",        "BMD",     "CNY",  "林吉特/吨"),
+}
+GLOBAL_FUTURES_CODES = set(GLOBAL_FUTURES_META.keys())
+
+# ─────────────────────────────────────────────
+# 全球期货 POINT_VALUE（已换算为人民币元/点）
+# 外盘价格 × 汇率 / 合约乘数换算系数
+# 汇率由akshare实时获取（人民币报价已含汇率）
+# ─────────────────────────────────────────────
+GLOBAL_PV = {
+    "CL":  100,   # 原油 100元/桶（akshare转了CNY）
+    "NG":  10,    # 天然气 10元/百万英热
+    "GC":  100,   # 黄金 100元/克（已从美元/盎司换算）
+    "SI":  10,    # 白银 10元/千克
+    "HG":  5,     # 铜 5元/磅（已转CNY）
+    "XAU": 100,   # 伦敦金
+    "XAG": 10,    # 伦敦银
+    "XPT": 100,   # 伦敦铂
+    "OIL": 100,   # 布伦特
+    "C":   5,     # 玉米 5元/手（CBOT，美分/蒲式耳换算）
+    "S":   5,     # 大豆
+    "W":   5,     # 小麦
+    "SM":  1,     # 豆粕
+    "BO":  1,     # 豆油
+    "ES":  50,    # 标普500 50元/点
+    "NQ":  20,    # 纳斯达克
+    "YM":  5,     # 道琼斯
+    "CT":  1,     # 棉花 1元/手
+    "RS":  1,     # 原糖
+    "FCPO":10,    # 马棕油
+    "HO":  10,    # 取暖油
+    "RB":  10,    # 汽油
+}
+
+# 全球期货保证金率（美元合约，交易所最低）
+GLOBAL_MARGIN = {
+    "CL": 0.10, "NG": 0.10, "GC": 0.08, "SI": 0.09,
+    "HG": 0.08, "OIL": 0.10,
+    "C": 0.07,  "S": 0.07,  "W": 0.07,
+    "ES": 0.12, "NQ": 0.12, "YM": 0.12,
+    "CT": 0.07, "RS": 0.07,
+    "XAU": 0.08, "XAG": 0.09, "XPT": 0.10,
+}
+
+# 全球期货手续费（开仓+平仓单边，元/手，akshare获取的CNY价格已含汇率）
+GLOBAL_COMMISSION = {
+    "CL":  ("fixed", 50),  "NG":  ("fixed", 20),
+    "GC":  ("fixed", 30),  "SI":  ("fixed", 15),
+    "HG":  ("fixed", 15),  "OIL": ("fixed", 50),
+    "C":   ("fixed", 10),  "S":   ("fixed", 10),
+    "W":   ("fixed", 10),  "SM":  ("fixed", 10),
+    "BO":  ("fixed", 10),  "ES":  ("fixed", 80),
+    "NQ":  ("fixed", 80),  "YM":  ("fixed", 60),
+    "CT":  ("fixed", 15),  "RS":  ("fixed", 15),
+    "XAU": ("fixed", 30),  "XAG": ("fixed", 15),
+}
+GLOBAL_DEFAULT_COMM = ("fixed", 30)
 
 # ─────────────────────────────────────────────
 # 反向映射：Sina品种符号(全大写) → VARIETY_META key
@@ -1042,6 +1187,8 @@ _DEFAULT_PRICE_LIMIT = 0.05  # 商品默认 ±5%
 def get_margin_rate(variety: str) -> float:
     """获取品种保证金率，默认10%"""
     prefix = "".join(filter(str.isalpha, variety)).upper()
+    if prefix in GLOBAL_FUTURES_CODES:
+        return GLOBAL_MARGIN.get(prefix, 0.10)
     return MARGIN_RATE.get(prefix, 0.10)
 
 
@@ -1052,11 +1199,13 @@ def calc_commission(variety: str, price: float, quantity: int = 1, is_open: bool
     开仓+平仓各算一次，故最终手续费 = 单边 × 2（外部调用方负责×2）
     """
     prefix = "".join(filter(str.isalpha, variety)).upper()
-    pv = POINT_VALUE.get(prefix, 1)
-    mode, value = COMMISSION.get(prefix, _DEFAULT_COMMISSION)
+    if prefix in GLOBAL_FUTURES_CODES:
+        pv = GLOBAL_PV.get(prefix, 1)
+        mode, value = GLOBAL_COMMISSION.get(prefix, GLOBAL_DEFAULT_COMM)
+    else:
+        pv = POINT_VALUE.get(prefix, 1)
+        mode, value = COMMISSION.get(prefix, _DEFAULT_COMMISSION)
     if mode == "rate":
-        # rate = 成交额 × value（如 0.0001 = 万分之一）
-        # 成交额 = price × quantity × point_value
         notional = price * quantity * pv
         return notional * value
     else:
@@ -1074,6 +1223,10 @@ def can_trade_at_price(variety: str, direction: int, current_price: float, pre_c
         return True, ""
 
     prefix = "".join(filter(str.isalpha, variety)).upper()
+    # 外盘期货无涨跌停板限制
+    if prefix in GLOBAL_FUTURES_CODES:
+        return True, ""
+
     limit = PRICE_LIMIT.get(prefix, _DEFAULT_PRICE_LIMIT)
     pct_chg = (current_price - pre_close) / pre_close
 
@@ -1089,6 +1242,92 @@ def can_trade_at_price(variety: str, direction: int, current_price: float, pre_c
         if pct_chg >= limit - 0.001:
             return False, f"涨停板限制，禁止平空（+{pct_chg*100:.1f}%，限+{limit*100:.1f}%）"
     return True, ""
+
+# ─────────────────────────────────────────────
+# 相关性热力图计算
+# ─────────────────────────────────────────────
+def calc_correlation_matrix(varieties: list, lookback: int = 60) -> dict:
+    """
+    计算多个期货品种的收益率相关性矩阵。
+    支持国内期货 + 全球期货（CME/ICE/COMEX/CBOT）。
+    varieties: 品种代码列表，如 ['TA', 'RU', 'CL', 'GC']
+    lookback: 滚动窗口天数（默认60天）
+    返回: {labels, matrix, heatmap, method, lookback, data_points}
+    """
+    import math as _math
+    closes = {}
+    for v in varieties:
+        prefix = "".join(filter(str.isalpha, v)).upper()
+        try:
+            if prefix in GLOBAL_FUTURES_CODES:
+                # 外盘期货历史数据
+                df = ak.futures_foreign_hist(symbol=prefix)
+                if df is None or len(df) < 20:
+                    continue
+                close = df['close'].astype(float).dropna()
+                closes[prefix] = close
+            else:
+                # 国内期货
+                key_lower = prefix.lower()
+                meta = VARIETY_META_LOWER.get(key_lower)
+                if not meta:
+                    continue
+                sina_sym = meta[1]
+                suffix = datetime.datetime.now().strftime('%y%m')
+                sym = sina_sym.upper() + suffix
+                df = ak.futures_zh_daily_sina(symbol=sym)
+                if df is None or len(df) < 20:
+                    continue
+                if 'close' not in df.columns:
+                    continue
+                close = df['close'].astype(float).dropna()
+                closes[prefix] = close
+        except Exception:
+            continue
+
+    if len(closes) < 2:
+        return {"labels": [], "matrix": [], "heatmap": [], "method": "pearson", "error": "数据不足"}
+
+    series_list, labels = [], []
+    for v in varieties:
+        prefix = "".join(filter(str.isalpha, v)).upper()
+        if prefix in closes:
+            series_list.append(closes[prefix])
+            labels.append(prefix)
+
+    if len(series_list) < 2:
+        return {"labels": [], "matrix": [], "heatmap": [], "method": "pearson", "error": "有效品种不足2个"}
+
+    price_df = pd.concat(series_list, axis=1).dropna()
+    price_df.columns = labels
+    if len(price_df) > lookback:
+        price_df = price_df.tail(lookback)
+
+    returns = price_df.pct_change().dropna()
+    n = len(labels)
+    corr_matrix = [[1.0] * n for _ in range(n)]
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            xi = returns.iloc[:, i].values
+            xj = returns.iloc[:, j].values
+            xim, xjm = xi - xi.mean(), xj - xj.mean()
+            num = (xim * xjm).sum()
+            den = _math.sqrt((xim**2).sum() * (xjm**2).sum())
+            corr = max(-1.0, min(1.0, num / den if den > 1e-10 else 0.0))
+            corr_matrix[i][j] = round(corr, 3)
+            corr_matrix[j][i] = round(corr, 3)
+
+    heatmap_data = [[j, i, corr_matrix[i][j]] for i in range(n) for j in range(n)]
+
+    return {
+        "labels": labels,
+        "matrix": corr_matrix,
+        "heatmap": heatmap_data,
+        "method": "pearson",
+        "lookback": lookback,
+        "data_points": len(returns),
+    }
 
 def calc_kdj(df, n=9, m1=3, m2=3):
     try:
@@ -2308,6 +2547,33 @@ def quote_variety(variety):
     cur_price, _, name, stale_info = get_realtime_price(variety)
     if cur_price is None:
         return jsonify({"error": f"无法获取 {variety} 行情"}), 404
+
+    # ── 全球期货（外盘）──
+    if prefix.upper() in GLOBAL_FUTURES_CODES:
+        pre_close, change_pct = _get_global_prev_close(prefix.upper())
+        try:
+            df = ak.futures_foreign_hist(symbol=prefix.upper())
+            close_s = df['close'].astype(float).dropna() if df is not None else None
+            support = round(float(close_s.tail(20).quantile(0.25)), 2) if close_s is not None and len(close_s) >= 20 else None
+            resistance = round(float(close_s.tail(20).quantile(0.75)), 2) if close_s is not None and len(close_s) >= 20 else None
+            atr_val = float(close_s.diff().abs().tail(14).mean()) if close_s is not None and len(close_s) >= 14 else None
+        except Exception:
+            support, resistance, atr_val = None, None, None
+        return jsonify({
+            "variety": prefix.upper(),
+            "name": name or GLOBAL_FUTURES_META.get(prefix.upper(), ('',))[0],
+            "current_price": cur_price,
+            "preclose": pre_close,
+            "change_pct": change_pct,
+            "support": support,
+            "resistance": resistance,
+            "atr": round(atr_val, 2) if atr_val else None,
+            "exchange": GLOBAL_FUTURES_META.get(prefix.upper(), ('', '', '', '', ''))[2],
+            "stale": stale_info,
+            "is_global": True,
+        })
+
+    # ── 国内期货 ──
     sr = calc_sr_multi_period(variety)
     (support, resistance, k_val, d_val, j_val, atr_val,
      oi_change, bb_pos, macd_h, vol_ratio, ma5_above_ma20,
@@ -2900,7 +3166,28 @@ def api_backtest():
         "strategy": strategy
     })
 
-@app.route('/api/chart/<variety>', methods=['GET'])
+@app.route('/api/correlation', methods=['GET'])
+def api_correlation():
+    """相关性热力图：GET /api/correlation?varieties=TA,RU,RB&lookback=60"""
+    import math as _math
+    varieties_str = request.args.get('varieties', '')
+    lookback = int(request.args.get('lookback', 60))
+
+    # 如果没有传品种，用自选列表
+    if not varieties_str:
+        watchlist = load_watchlist()
+        varieties = [v.get('variety', '') for v in watchlist]
+    else:
+        varieties = [v.strip().upper() for v in varieties_str.split(',') if v.strip()]
+
+    if len(varieties) < 2:
+        return jsonify({"error": "至少需要2个品种"}), 400
+
+    result = calc_correlation_matrix(varieties, lookback)
+    if "error" in result and not result.get("labels"):
+        return jsonify(result), 200
+    return jsonify(result)
+
 def chart_data(variety):
     prefix = "".join(filter(str.isalpha, variety))
     suffix = "".join(filter(str.isdigit, variety))
@@ -2957,28 +3244,87 @@ def api_scan_opportunities():
             return jsonify({"cached": True, "count": len(_opportunities_cache['items']),
                             "items": _opportunities_cache['items'], "cache_age": round(now - _opportunities_cache['ts'])})
 
-    results = []
-    # 从 VARIETY_META 取出所有品种（排除非活跃）
-    all_varieties = list(VARIETY_META.keys())
+    # ── 全球期货扫描（独立函数）──
+    def _scan_one_global(code):
+        """扫描单个全球期货品种，返回与 scan_one 相同格式的机会字典"""
+        try:
+            price, exchange, name = _fetch_global_futures_price(code) or (None, None, None)
+            if price is None or price <= 0:
+                return None
+            pv = GLOBAL_PV.get(code, 1)
+            # 取历史数据计算支撑/阻力
+            try:
+                df = ak.futures_foreign_hist(symbol=code)
+                if df is None or len(df) < 20:
+                    return None
+                close_s = df['close'].astype(float).dropna()
+                if len(close_s) < 20:
+                    return None
+                support = round(float(close_s.tail(20).quantile(0.25)), 2)
+                resistance = round(float(close_s.tail(20).quantile(0.75)), 2)
+                atr_val = float(close_s.diff().abs().tail(14).mean())
+                k_val, d_val, j_val = None, None, None
+                oi_change, bb_pos, macd_h, vol_ratio, ma5_above_ma20 = None, None, None, None, None
+                div_type, div_strength = 0, 0
+            except Exception:
+                return None
+
+            reasons = []
+            atr = atr_val or 0
+            entry_long = round(support + 0.5 * atr, 2) if support else None
+            entry_short = round(resistance - 0.5 * atr, 2) if resistance else None
+            if entry_long and price > 0:
+                dev_long = abs(price - entry_long) / entry_long
+                if dev_long < 0.02:
+                    reasons.append({"type": "near_entry", "side": "long", "entry": entry_long, "dev_pct": round(dev_long * 100, 1)})
+            if entry_short and price > 0:
+                dev_short = abs(price - entry_short) / entry_short
+                if dev_short < 0.02:
+                    reasons.append({"type": "near_entry", "side": "short", "entry": entry_short, "dev_pct": round(dev_short * 100, 1)})
+
+            score = None
+            if support and resistance and price:
+                mid = (support + resistance) / 2
+                dist_to_mid = abs(price - mid) / mid if mid > 0 else 0.5
+                score = max(0, min(100, round((1 - dist_to_mid * 2) * 50 + 30)))
+
+            return {
+                "variety": code,
+                "name": name or GLOBAL_FUTURES_META.get(code, (code, '', '', '', ''))[0],
+                "exchange": exchange,
+                "direction": None,
+                "current_price": round(price, 2),
+                "support": support,
+                "resistance": resistance,
+                "score": score,
+                "reasons": reasons,
+                "is_global": True,
+            }
+        except Exception:
+            return None
+
+
 
     def scan_one(meta_key):
-        """扫描单个品种机会，meta_key 如 'TA' 或 'cu'"""
+        """扫描单个品种机会，meta_key 如 'TA' 或 'cu' 或 'CL'（全球期货）"""
         try:
             prefix_upper = meta_key.upper()
             if prefix_upper in INACTIVE_CONTRACTS:
                 return None
 
-            # 构造当前主力合约名（如 TA2610）让 Sina hq 接口正确返回
+            # ── 全球期货（外盘）──
+            if prefix_upper in GLOBAL_FUTURES_CODES:
+                return _scan_one_global(prefix_upper)
+
+            # ── 国内期货 ──
             suffix = ""
             try:
                 now_month = datetime.datetime.now().strftime('%y%m')
                 suffix = now_month
-                variety_full = f"{prefix_upper}{suffix}"  # e.g. TA2610
+                variety_full = f"{prefix_upper}{suffix}"
             except Exception:
                 variety_full = prefix_upper
 
-            # v0.4.x：避免 scan 内部再开线程池，减少嵌套并发导致的偶发卡死/超时
-            # 外层 as_completed 已经并发，这里顺序执行更稳
             price, unit, name, *_ = get_realtime_price(variety_full)
             sr = calc_sr_multi_period(variety_full)
 
